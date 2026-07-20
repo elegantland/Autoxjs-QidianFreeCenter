@@ -1,5 +1,5 @@
 # Autoxjs-QidianFreeCenter
-**起点福利中心自动化脚本 (版本: 260618)**
+**起点福利中心自动化脚本 (版本: 260720)**
 
 本脚本基于 [qkqpttgf/Autoxjs-QidianFreeCenter](https://github.com/qkqpttgf/Autoxjs-QidianFreeCenter) 开发，并针对 **一加 Ace 5 至尊版** 进行了深度适配与逻辑增强。
 

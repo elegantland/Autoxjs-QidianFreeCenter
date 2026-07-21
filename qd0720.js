@@ -221,7 +221,7 @@ function enterFreeCenter() {
         click("福利中心", 0);
         let m = 0;
         while (m < 5 && !textContains("完成任务得奖励").exists() && !text("去完成").exists()) {
-            sleep(350);
+            sleep(1000);
             m++;
         }
         if (m == 5 && text("福利中心").exists() && text("规则").exists()) {

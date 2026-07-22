@@ -8,7 +8,7 @@ var enableLottery = false;       // 是否执行转盘抽奖（true: 开启, fal
 // -----------------
 
 var closeButtonBottom = 550; // 新广告右上角的X的下沿高度，控制台也放这么高
-// X按钮位置不固定，扫描范围 X:1110-1130, Y:220-550
+// X按钮位置不固定，扫描范围 X:1110-1130, Y:220-550 目前是1182 280
 var t_click_step = 30;      // 循环扫描点击时，每步移这么远再点下一次
 var t_click_x_left = 110;   // 循环扫描点击区域的左边框，到屏幕右边的距离（device.width-110≈1110）
 var t_click_x_right = 90;   // 循环扫描点击区域的右边框，到屏幕右边的距离（device.width-90≈1130）
@@ -118,10 +118,10 @@ function launchQidian() {
     if (p != qidianPackageName) {
         l_verbose("其它app：", getAppName(p));
         home();
-        sleep(500);
+        sleep(900);
     }
     launch(qidianPackageName);
-    sleep(900);
+    sleep(1200);
 }
 function openQidian() {
     launchQidian();
@@ -221,14 +221,14 @@ function enterFreeCenter() {
         click("福利中心", 0);
         let m = 0;
         while (m < 5 && !textContains("完成任务得奖励").exists() && !text("去完成").exists()) {
-            sleep(1000);
+            sleep(350);
             m++;
         }
         if (m == 5 && text("福利中心").exists() && text("规则").exists()) {
             l_verbose("进入福利中心，但下半部分无法识别");
             back();
             n = 0;
-            sleep(1000);
+            sleep(500);
         }
         n++;
     } while (n < 8 && wherePage() != "freecenter");
@@ -355,7 +355,7 @@ function lottery() {
         freeCenterScrolled = scrollShowButton(freeCenterScrolled, e);
         e.parent().click();
         l_verbose("点进签到日历");
-        sleep(2000); // 增加进入后的等待时间
+        sleep(1500); // 增加进入后的等待时间
         
         let b = className("android.widget.Button").text("领奖励").findOne(1000);
         if (b) { 
@@ -458,7 +458,7 @@ function lottery() {
         }
     }
     back();
-    sleep(2000);
+    sleep(1500);
     return result;
 }
 function runGameTask() {
@@ -481,7 +481,7 @@ function runGameTask() {
         }
         if (b != null) {
             robustClick(b);
-            sleep(2000);
+            sleep(1500);
             let res = game_play(min);
             if (res == 1) back();
             sleep(1000);
@@ -816,6 +816,8 @@ function video_look(btn) {
 
         // "点击/玩"类型广告会跳转到新页面，优先执行直接切换回起点，替代模拟返回
         if (isClickNewPage) {
+            // 从微信等第三方应用返回时，页面切换需要时间，先等待1秒再判断
+            sleep(1000);
             if (currentPackage() != qidianPackageName) {
                 l_verbose("点击/玩类型，执行直接切换回起点");
                 launchQidian();
@@ -826,7 +828,7 @@ function video_look(btn) {
             // 增加一次物理/手势返回，确保关闭可能弹出的系统对话框或空白页
             l_verbose("执行一次保底返回");
             back();
-            sleep(300);
+            sleep(500);
 
             if (isSlideTask) {
                 l_verbose("滑动任务，执行切换");
@@ -1862,7 +1864,7 @@ try {
     // 当日阅读5分钟（含去阅读任务）
     l_log("检查阅读类任务");
     let target1 = ["去阅读", "去完成"]; // 识别“去阅读”以及跳转类的“去完成”
-    let expstr1 = ["限时", "当日阅读"]; // 阅读任务必须包含“限时”
+    let expstr1 = ["限时", "当日阅读", "再读"]; // 阅读任务识别关键字（"再读"兼容"限时加点"和"广告加点"）
     
     let foundReadTask = false;
     for (let i = 0; i < target1.length; i++) {
@@ -1871,8 +1873,8 @@ try {
         let aa = text(target).find();
         for (let ii = aa.length - 1; ii > -1; ii--) {
             let s = getDescriptionOnLeft(aa[ii]);
-            // 必须包含“限时”且不能包含广告/加点等非纯阅读关键词
-            if (s.indexOf("限时") > -1 && strHasArr(s, expstr1)) {
+            // 阅读任务特征：包含"限时"或"再读"（兼容"限时加点"和"广告加点"两种命名）
+            if (s.indexOf("限时") > -1 || s.indexOf("再读") > -1 && strHasArr(s, expstr1)) {
                 freeCenterScrolled = scrollShowButton(freeCenterScrolled, aa[ii]);
                 aa[ii] = refreshView(aa[ii]);
                 do {
@@ -1901,7 +1903,7 @@ try {
                             l_info("阅读完成，正在返回福利中心...");
                             enterMe();
                             enterFreeCenter();
-                            sleep(1500);
+                            sleep(1000);
 
                             foundReadTask = true;
                             break; 

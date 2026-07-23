@@ -816,19 +816,20 @@ function video_look(btn) {
 
         // "点击/玩"类型广告会跳转到新页面，优先执行直接切换回起点，替代模拟返回
         if (isClickNewPage) {
-            // 从微信等第三方应用返回时，页面切换需要时间，先等待1秒再判断
+            // 从微信等第三方应用返回时，页面切换需要时间
             sleep(1000);
             if (currentPackage() != qidianPackageName) {
                 l_verbose("点击/玩类型，执行直接切换回起点");
                 launchQidian();
-                sleep(1000);
+                sleep(2000);
             }
             
-            // 兜底：如果执行了切换还是没回到起点，或者由于没安装 App 导致卡在应用商店/浏览器
-            // 增加一次物理/手势返回，确保关闭可能弹出的系统对话框或空白页
-            l_verbose("执行一次保底返回");
-            back();
-            sleep(500);
+            // 兜底：只有在切换后仍未回到起点时才执行返回（如卡在应用商店/浏览器）
+            if (currentPackage() != qidianPackageName) {
+                l_verbose("切换后仍未回到起点，执行一次保底返回");
+                back();
+                sleep(500);
+            }
 
             if (isSlideTask) {
                 l_verbose("滑动任务，执行切换");
@@ -867,6 +868,7 @@ function video_look(btn) {
                     } else {
                         l_verbose("执行直接切换回起点");
                         launchQidian();
+                        sleep(800);
                     }
                     sleep(800);
                 }
@@ -1045,9 +1047,6 @@ function video_look(btn) {
                     debugDelay = 3;
                     while (sec > 0) {
                         sleep(1000);
-                        if (currentPackage().indexOf("permissioncontroller") == -1) {
-                            if (sec % 5 == 0) click(random(10, 20), random(10, 20));
-                        }
                         sec--;
                     }
                     l_verbose("应该看完");
@@ -1262,7 +1261,7 @@ function video_look(btn) {
                     } else if (n < 5) {
                         l_verbose("执行直接切换回起点");
                         launchQidian();
-                        sleep(2000);
+                        sleep(2300);
                     } else {
                         l_error("未知原因退出失败");
                         throw new Error("退出失败");
@@ -1864,7 +1863,7 @@ try {
     // 当日阅读5分钟（含去阅读任务）
     l_log("检查阅读类任务");
     let target1 = ["去阅读", "去完成"]; // 识别“去阅读”以及跳转类的“去完成”
-    let expstr1 = ["限时", "当日阅读", "再读"]; // 阅读任务识别关键字（"再读"兼容"限时加点"和"广告加点"）
+    let expstr1 = ["限时", "当日阅读", "加点"]; // 阅读任务识别关键字（"再读"兼容"限时加点"和"广告加点"）
     
     let foundReadTask = false;
     for (let i = 0; i < target1.length; i++) {
@@ -1961,8 +1960,11 @@ try {
     let bonusBtnTexts = ["领奖励", "领积分"]; // 可领按钮，与广告同屏处理
     let scrollCount = 0;
     let gameTaskDone = false; // 广告滚动时检测并执行游戏任务
+    let bonusChecked = false; // 只在第一次扫描时领奖励，避免反复重置scrollCount
     while (true) {
         // 先检查当前屏幕有无可领奖励，避免后面再单独滚动查找
+        if (!bonusChecked) {
+        bonusChecked = true;
         for (let bj = 0; bj < bonusBtnTexts.length; bj++) {
             let btnt = bonusBtnTexts[bj];
             if (text(btnt).exists()) {
@@ -1990,6 +1992,7 @@ try {
                 }
             }
         }
+        } // end if (!bonusChecked)
 
         let foundOnThisScreen = false;
         let anyValidOnScreen = false;

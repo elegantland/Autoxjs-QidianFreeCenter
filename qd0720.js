@@ -565,12 +565,26 @@ function video_look(btn) {
             let res_fast = cappad([0, 0, device.width, 550]); 
             for (let i = 0; i < res_fast.length; i++) {
                 let txt = res_fast[i].text;
+                let fast_match = txt.match(/观看\s*(\d+(?:\.\d+)?)\s*秒/);
+                if (fast_match) {
+                    let fast_sec = parseFloat(fast_match[1]);
+                    if (fast_sec > 0 && fast_sec < 200) {
+                        ad_raw = fast_sec;
+                        l_log("核心区直接识别观看时长：", txt, fast_sec, "秒");
+                        break;
+                    }
+                }
                 if (txt.indexOf("秒") > -1 || txt.indexOf("完成") > -1 || txt.indexOf("任务") > -1 || txt.indexOf("滑动") > -1) {
                     l_log("核心区快速识别成功：", txt);
                     m = 3; 
                     break;
                 }
             }
+        }
+
+        if (ad_raw > -1) {
+            l_log("已识别广告时长，跳过缓冲循环：", ad_raw, "秒");
+            break;
         }
 
         while (wp == "freecenter" || (wp == "adframe" && !textContains("跳过").exists() && !textContains("秒").exists())) {
@@ -660,11 +674,18 @@ function video_look(btn) {
             if (ad_raw > -1 || ad_clicknewpage > -1) {
                 if (ad_clicknewpage > -1) {
                     let clicked = false;
-                    l_verbose("等待 4 秒让按钮加载...");
-                    sleep(4000);
+                    l_verbose("等待 3.5 秒让按钮加载...");
+                    sleep(3500);
                     
-                    // 识别按钮：聚焦下半部分（Y >= 1600）
-                    let res_new = cappad([0, 1600, device.width, device.height - 1600]); 
+                    // 识别按钮：扩大截取范围到 Y >= 1200，覆盖更多按钮位置
+                    let res_new = cappad([0, 1200, device.width, device.height - 1200]); 
+                    
+                    // 如果截取范围内没有识别到文字，重试一次（按钮可能加载较慢）
+                    if (!res_new || res_new.length == 0) {
+                        l_verbose("首次OCR未识别到文字，重试...");
+                        sleep(1000);
+                        res_new = cappad([0, 1200, device.width, device.height - 1200]);
+                    }
                     
                     // 1. 优先 OCR 识别特定范围或关键词按钮
                     // 针对微信小游戏：1888-2050 范围优先
@@ -750,8 +771,8 @@ function video_look(btn) {
                     }
                     
                     if (clicked) {
-                        l_verbose("等待 4 秒检测跳转状态...");
-                        sleep(4000);
+                        l_verbose("等待 3.5 秒检测跳转状态...");
+                        sleep(3500);
 
                         let wp_now = wherePage();
                         let curr_pkg = currentPackage();
@@ -768,13 +789,20 @@ function video_look(btn) {
                             l_info("检测到已成功跳转至第三方应用：", getAppName(curr_pkg));
                         }
                         // 跳转检测等待的时间从总倒计时中扣除
-                        if (ad_clicknewpage > -1) ad_clicknewpage -= 4;
+                        if (ad_clicknewpage > -1) ad_clicknewpage -= 3.5;
                     }
                 }
                 break;
             }
         }
     } while (!(textContains("得奖励").exists() || textContains("跳过").exists() || textContains("任务").exists() || textContains("完成").exists()));
+
+    // 识别超时且未识别到广告类型时，执行一次右划返回，退出广告页
+    if (ad_raw == -1 && ad_clicknewpage == -1) {
+        l_verbose("识别超时，执行右划返回");
+        back();
+        sleep(500);
+    }
 
     if (ad_raw > -1 || ad_clicknewpage > -1) {
         // 新广告
@@ -820,8 +848,9 @@ function video_look(btn) {
             sleep(1000);
             if (currentPackage() != qidianPackageName) {
                 l_verbose("点击/玩类型，执行直接切换回起点");
+                
+                sleep(2000)
                 launchQidian();
-                sleep(2000);
             }
             
             // 兜底：只有在切换后仍未回到起点时才执行返回（如卡在应用商店/浏览器）
@@ -860,16 +889,14 @@ function video_look(btn) {
             }
 
             if (n < try_back_time) {
-                // 只有包名不在起点时才执行切换
-                if (currentPackage() != qidianPackageName) {
-                    if (currentPackage().indexOf("permissioncontroller") > -1) {
-                        l_verbose("权限管理弹窗，直接右滑返回");
-                        back();
-                    } else {
-                        l_verbose("执行直接切换回起点");
-                        launchQidian();
-                        sleep(800);
-                    }
+                // 权限管理弹窗：直接右滑返回，不需要切换回起点（弹窗在起点内）
+                if (currentPackage().indexOf("permissioncontroller") > -1) {
+                    l_verbose("权限管理弹窗，直接右滑返回");
+                    back();
+                    sleep(1000); // 等待弹窗消失
+                } else if (currentPackage() != qidianPackageName) {
+                    l_verbose("执行直接切换回起点");
+                    launchQidian();
                     sleep(800);
                 }
             }
@@ -880,12 +907,15 @@ function video_look(btn) {
 
             // 只有当：不是跳转类广告，且包名已跳出起点，且没识别到广告/浏览器页，才判定为界面不对
             if (!isClickNewPage && p_now != qidianPackageName && wp_recheck != "adframe" && wp_recheck != "browser") {
-                l_verbose("界面不对0 (跳出起点): " + wp_recheck + " [" + p_now + "]");
-                n = 0;
+                // 权限管理弹窗：直接右滑返回，不需要切换回起点
                 if (p_now.indexOf("permissioncontroller") > -1) {
                     l_verbose("权限管理弹窗，直接右滑返回");
                     back();
+                    sleep(1000); // 等待弹窗消失
+                    n = 0;
                 } else {
+                    l_verbose("界面不对0 (跳出起点): " + wp_recheck + " [" + p_now + "]");
+                    n = 0;
                     home();
                     console.hide();
                     cmdIsDisplay = false;
@@ -1973,12 +2003,13 @@ try {
                     l_verbose(shortdash);
                     freeCenterScrolled = scrollShowButton(freeCenterScrolled, btn[bi]);
                     let btn_now = refreshView(btn[bi]);
-                    l_verbose(getDescriptionOnLeft(btn_now));
+                    let desc = getDescriptionOnLeft(btn_now).split("\n")[0];
+                    l_verbose(desc);
                     robustClick(btn_now);
                     scrollCount = 0; // 领到奖励，重置滚动计数
                     let c1 = 0;
-                    for (let ii = 0; ii < 5; ii++) {
-                        sleep(200);
+                    for (let ii = 0; ii < 3; ii++) {
+                        sleep(300);
                         c1 = clickIknown();
                         if (c1) break;
                     }

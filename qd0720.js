@@ -3,7 +3,7 @@ var logFile = false; // 是否将日志保存到文件中
 
 // --- 用户配置项 ---
 var targetBookName = "盖世双谐"; // 去阅读任务需要搜索的书名
-var enableGameTask = true;      // 是否执行玩游戏任务（true: 开启, false: 关闭）
+var enableGameTask = false;      // 是否执行玩游戏任务（true: 开启, false: 关闭）
 var enableLottery = false;       // 是否执行转盘抽奖（true: 开启, false: 关闭）
 // -----------------
 
@@ -26,6 +26,7 @@ var shortdash = "——————";
 var freeCenterScrolled = 0;
 var adCount = 0, lotteryCount = 0, exchangeCount = 0, readTime = 0, gamePlayTime = 0;
 var ADReceive = new Object();
+var ad_raw = -1, ad_clicknewpage = -1; // 广告识别结果（供调用方判断是否识别成功）
 // 按钮固定位置（通常是底部中央的蓝色按钮）
 var fixedButtonPos = { x: 630, y: 2320 };
 // 扫描点击的坐标持久化
@@ -96,6 +97,9 @@ function wherePage() {
         return "adframe";
     }
     if (textContains("后看广告").exists() || textContains("秒后获取奖励").exists() || textContains("观看视频").exists()) {
+        return "adframe";
+    }
+    if (textContains("点击后").exists() && (textContains("秒").exists() || textContains("奖励").exists())) {
         return "adframe";
     }
     if (text("跳过").exists() || (textContains("秒").exists() && textContains("奖励").exists())) {
@@ -511,7 +515,7 @@ function video_look(btn) {
     // 引入外层大循环：用于处理滑动任务后的状态重置
     // 当发生滑动任务需要重新识别时，通过 continue ad_main_loop; 跳回这里
     ad_main_loop: while (true) {
-        let ad_raw = -1, ad_clicknewpage = -1; // 生页面、 要再点击一下的页面
+        ad_raw = -1; ad_clicknewpage = -1; // 每次循环重置
         let m = 0;
         has_slide_reset = false; // 每次进入主循环重置标记
         let a1 = ["查看", "详情", "立即", "继续", "下载", "了解", "更多", "领取", "去", "秒杀"];
@@ -561,11 +565,14 @@ function video_look(btn) {
 
          // 在缓冲阶段就尝试进行一次快速 OCR，识别是否有倒计时或任务提示
         if (wp == "adframe" && m == 0) {
-            // 快速识别：聚焦左上角核心区域
+            // 快速识别：先聚焦左上角核心区域
             let res_fast = cappad([0, 0, device.width, 550]); 
+            // 如果核心区域没识别到关键文字，扩大到上半部分兜底
+            if (res_fast.length == 0) res_fast = cappad([0, 0, device.width, 1600]);
             for (let i = 0; i < res_fast.length; i++) {
                 let txt = res_fast[i].text;
-                let fast_match = txt.match(/观看\s*(\d+(?:\.\d+)?)\s*秒/);
+                // 兼容"观看X秒"和"看X秒"两种格式
+                let fast_match = txt.match(/(?:观看|看)\s*(\d+(?:\.\d+)?)\s*秒/);
                 if (fast_match) {
                     let fast_sec = parseFloat(fast_match[1]);
                     if (fast_sec > 0 && fast_sec < 200) {
@@ -574,10 +581,17 @@ function video_look(btn) {
                         break;
                     }
                 }
-                if (txt.indexOf("秒") > -1 || txt.indexOf("完成") > -1 || txt.indexOf("任务") > -1 || txt.indexOf("滑动") > -1) {
+                if (txt.indexOf("秒") > -1 || txt.indexOf("完成") > -1 || txt.indexOf("任务") > -1 || txt.indexOf("滑动") > -1 || txt.indexOf("奖励") > -1) {
                     l_log("核心区快速识别成功：", txt);
                     m = 3; 
                     break;
+                }
+            }
+            // 兜底：如果 OCR 无结果，尝试用无障碍检测广告特征文字
+            if (m == 0 && ad_raw == -1) {
+                if (textContains("秒").exists() && (textContains("奖励").exists() || textContains("得").exists())) {
+                    l_log("无障碍兜底识别到广告特征文字");
+                    m = 3;
                 }
             }
         }
@@ -663,7 +677,7 @@ function video_look(btn) {
                             l_log("点/玩类型：", sec || 15);
                             ad_clicknewpage = sec || 15;
                             break;
-                        } else if (txt.indexOf("浏览") > -1 || txt.indexOf("观看") > -1 || txt.indexOf("看") > -1 || txt.indexOf("秒") > -1) {
+                        } else if (txt.indexOf("浏览") > -1 || txt.indexOf("观看") > -1 || txt.indexOf("秒") > -1) {
                             l_log("览/看/秒类型：", sec || 15);
                             ad_raw = sec || 15;
                             break;
@@ -778,13 +792,9 @@ function video_look(btn) {
                         let curr_pkg = currentPackage();
 
                         if (curr_pkg == qidianPackageName) {
-                            l_log("仍留在起点 App 内，检查任务状态...");
-                            if (wp_now == "adframe" && !textContains("已成功").exists() && !textContains("任务中").exists()) {
-                                l_warn("未检测到跳转且任务未激活，重新识别...");
-                                m = 2;
-                                continue;
-                            }
-                            l_info("检测到应用内任务已激活");
+                            l_log("仍留在起点 App 内，执行手势返回关闭页面");
+                            back();
+                            sleep(500);
                         } else {
                             l_info("检测到已成功跳转至第三方应用：", getAppName(curr_pkg));
                         }
@@ -844,18 +854,20 @@ function video_look(btn) {
 
         // "点击/玩"类型广告会跳转到新页面，优先执行直接切换回起点，替代模拟返回
         if (isClickNewPage) {
-            // 从微信等第三方应用返回时，页面切换需要时间
             sleep(1000);
+            // 先切换回起点
             if (currentPackage() != qidianPackageName) {
                 l_verbose("点击/玩类型，执行直接切换回起点");
-                
-                sleep(2000)
                 launchQidian();
+                sleep(2000); // 等待起点完全切换到前台
             }
-            
-            // 兜底：只有在切换后仍未回到起点时才执行返回（如卡在应用商店/浏览器）
-            if (currentPackage() != qidianPackageName) {
-                l_verbose("切换后仍未回到起点，执行一次保底返回");
+            // 只在起点内且不在福利中心时才返回（关闭内部浏览器页面）
+            if (currentPackage() == qidianPackageName && wherePage() != "freecenter") {
+                l_verbose("已回到起点，执行手势返回关闭页面");
+                back();
+                sleep(1500);
+            } else if (currentPackage() != qidianPackageName) {
+                l_warn("切换后仍未回到起点，执行保底返回");
                 back();
                 sleep(500);
             }
@@ -1119,7 +1131,7 @@ function video_look(btn) {
                             let b = res[i].bounds;
                             click(parseInt((b.left + b.right) / 2), parseInt((b.top + b.bottom) / 2));
                             l_log("点击继续观看/浏览");
-                            sleep(3000);
+                            sleep(1000);
                             
                             // 重新检查是否包含滑动任务提示
                             let res_check = cappad([0, 0, device.width, 550]);
@@ -1972,7 +1984,7 @@ try {
                         }
                     }
                     l_verbose(shortdash);
-                    sleep(3000);
+                    sleep(1000);
                 } while (refreshView(aa[ii]).text() == aa[ii].text());
                 foundReadTask = true;
                 break;
@@ -1991,6 +2003,7 @@ try {
     let scrollCount = 0;
     let gameTaskDone = false; // 广告滚动时检测并执行游戏任务
     let bonusChecked = false; // 只在第一次扫描时领奖励，避免反复重置scrollCount
+    let adRetryCount = 0; // 广告识别失败重试计数
     while (true) {
         // 先检查当前屏幕有无可领奖励，避免后面再单独滚动查找
         if (!bonusChecked) {
@@ -2068,7 +2081,40 @@ try {
                 } else {
                     sleep(500);
                 }
-                if (c == 1) video_look(aa[ii]);
+                if (c == 1) {
+                    video_look(aa[ii]);
+                    // 广告识别失败重试：关闭广告再重新进入，最多重试2次
+                    while (ad_raw == -1 && ad_clicknewpage == -1 && adRetryCount < 2) {
+                        adRetryCount++;
+                        l_warn("广告识别失败，第" + adRetryCount + "次重试：关闭广告重新进入...");
+                        back();
+                        sleep(2000);
+                        // 重新定位并点击任务按钮
+                        let reBtn = text(target).find();
+                        let reFound = false;
+                        for (let ri = 0; ri < reBtn.length; ri++) {
+                            let rs = getDescriptionOnLeft(reBtn[ri]);
+                            if (rs == "") {
+                                let rp = reBtn[ri].parent();
+                                if (rp) rs = getTextOfView(rp);
+                            }
+                            if (rs.indexOf("广告") > -1 || rs.indexOf("限时") > -1 || rs.indexOf("加点") > -1) {
+                                robustClick(reBtn[ri]);
+                                sleep(2000);
+                                video_look(reBtn[ri]);
+                                reFound = true;
+                                break;
+                            }
+                        }
+                        if (!reFound) {
+                            l_error("重试失败：未找到任务按钮");
+                            break;
+                        }
+                    }
+                    if (ad_raw == -1 && ad_clicknewpage == -1) {
+                        l_error("广告识别失败，已重试" + adRetryCount + "次，放弃此任务");
+                    }
+                }
                 if (c == 2) jumpMarket(aa[ii]);
                 foundOnThisScreen = true;
                 scrollCount = 0; // 找到了，重置滚动

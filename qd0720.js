@@ -119,7 +119,7 @@ function wherePage() {
 function launchQidian() {
     // 切换回起点
     let p = currentPackage();
-    if (p != qidianPackageName) {
+    if (p != qidianPackageName && p.indexOf("permissioncontroller") == -1) {
         l_verbose("其它app：", getAppName(p));
         home();
         sleep(900);
@@ -597,8 +597,7 @@ function video_look(btn) {
         }
 
         if (ad_raw > -1) {
-            l_log("已识别广告时长，跳过缓冲循环：", ad_raw, "秒");
-            break;
+            l_verbose("已识别广告时长：", ad_raw, "秒，继续正常缓冲流程");
         }
 
         while (wp == "freecenter" || (wp == "adframe" && !textContains("跳过").exists() && !textContains("秒").exists())) {
@@ -704,7 +703,7 @@ function video_look(btn) {
                     // 1. 优先 OCR 识别特定范围或关键词按钮
                     // 针对微信小游戏：1888-2050 范围优先
                     let wechatKeywords = ["微信", "小游戏", "立即玩", "开始玩", "立即获得", "立即抢购", "立即下载"];
-                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完"];
+                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完", "活动规则", "详情见"];
                     
                     for (let i = 0; i < res_new.length; i++) {
                         let b = res_new[i].bounds;
@@ -855,21 +854,30 @@ function video_look(btn) {
         // "点击/玩"类型广告会跳转到新页面，优先执行直接切换回起点，替代模拟返回
         if (isClickNewPage) {
             sleep(1000);
-            // 先切换回起点
-            if (currentPackage() != qidianPackageName) {
+            let p_now = currentPackage();
+
+            // 权限管理弹窗是起点内的弹窗，等待剩余时间后直接手势返回
+            if (p_now.indexOf("permissioncontroller") > -1) {
+                l_verbose("点击/玩类型遇到权限管理弹窗，等待剩余时间后手势返回");
+                let waitSec = Math.max(adSec - sec - 2, 0);
+                while (waitSec > 0) { sleep(1000); waitSec--; }
+                back();
+                sleep(1500);
+            } else if (p_now != qidianPackageName) {
+                // 先切换回起点
                 l_verbose("点击/玩类型，执行直接切换回起点");
                 launchQidian();
                 sleep(2000); // 等待起点完全切换到前台
-            }
-            // 只在起点内且不在福利中心时才返回（关闭内部浏览器页面）
-            if (currentPackage() == qidianPackageName && wherePage() != "freecenter") {
-                l_verbose("已回到起点，执行手势返回关闭页面");
-                back();
-                sleep(1500);
-            } else if (currentPackage() != qidianPackageName) {
-                l_warn("切换后仍未回到起点，执行保底返回");
-                back();
-                sleep(500);
+                // 只在起点内且不在福利中心时才返回（关闭内部浏览器页面）
+                if (currentPackage() == qidianPackageName && wherePage() != "freecenter") {
+                    l_verbose("已回到起点，执行手势返回关闭页面");
+                    back();
+                    sleep(1500);
+                } else if (currentPackage() != qidianPackageName) {
+                    l_warn("切换后仍未回到起点，执行保底返回");
+                    back();
+                    sleep(500);
+                }
             }
 
             if (isSlideTask) {
@@ -1063,7 +1071,7 @@ function video_look(btn) {
 
                     // 识别“续”的按钮：需要识别中下部区域 (Y > 1200)
                     let res_btn = cappad([0, 1200, device.width, device.height - 1200]);
-                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完"];
+                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完", "活动规则", "详情见"];
                     let clicked_resume = false;
 
                     for (let i = 0; i < res_btn.length; i++) {
@@ -1698,7 +1706,7 @@ function clickIknown() {
         let a = "恭喜获得";
         if (t1.substring(0, a.length) == a) addReceived(t1.substring(a.length));
 
-        sleep(800);
+        sleep(100);
         // 优先精确匹配"知道了"，再尝试其他常见按钮
         let iknow = text("知道了").findOne(800) || text("知道啦").findOne(200);
         if (!iknow) iknow = textContains("知道").findOne(500);
@@ -1888,8 +1896,10 @@ openQidian();
 l_log(longdash);
 sleep(500);
 
-// 进入福利中心
-enterFreeCenter();
+// 进入福利中心（openQidian()已判断则跳过）
+if (wherePage() != "freecenter") {
+    enterFreeCenter();
+}
 l_log(longdash);
 sleep(1000);
 

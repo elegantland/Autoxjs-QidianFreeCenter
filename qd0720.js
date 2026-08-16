@@ -119,15 +119,30 @@ function wherePage() {
 function launchQidian() {
     // 切换回起点
     let p = currentPackage();
-    if (p != qidianPackageName && p.indexOf("permissioncontroller") == -1) {
-        l_verbose("其它app：", getAppName(p));
-        home();
-        sleep(900);
+    if (p != qidianPackageName) {
+        if (p.indexOf("permission") > -1) {
+            l_verbose("权限管理弹窗，back关闭");
+            back();
+            sleep(500);
+            return; // back后已回到起点，无需再launch
+        } else {
+            l_verbose("其它app：", getAppName(p));
+            home();
+            sleep(500);
+        }
     }
     launch(qidianPackageName);
-    sleep(1200);
+    sleep(800);
 }
 function openQidian() {
+    // 如果已在福利中心/签到页，直接跳过启动逻辑
+    let wp_init = wherePage();
+    if (wp_init == "freecenter" || wp_init == "signdetail") {
+        l_info("当前已在已知页面：" + wp_init);
+        l_info("起点已就绪");
+        return true;
+    }
+
     launchQidian();
 
     let n = 0;
@@ -163,14 +178,13 @@ function openQidian() {
         if (n > 20 && currentPackage() != qidianPackageName) break;
     } while (wp == "" || wp == "isNotQidain");
     
-    sleep(600);
-    
-    // 如果已经在福利中心相关页面，跳过进入“我”的逻辑
-    let wp_final = wherePage();
-    if (wp_final == "freecenter" || wp_final == "signdetail") {
-        l_info("已直接进入目标区域");
-        return;
+    // 如果已经在福利中心相关页面，跳过等待和后续逻辑
+    if (wp == "freecenter" || wp == "signdetail") {
+        l_info("起点已就绪");
+        return true;
     }
+
+    sleep(600);
 
     if (!enterMe()) {
         l_error("无法进入‘我’界面，请手动复原到首页");
@@ -178,6 +192,7 @@ function openQidian() {
         l_exit();
     }
     l_info("起点已就绪");
+    return false;
 }
 function enterMe() {
     closeDialogs();
@@ -206,7 +221,6 @@ function enterMe() {
         if (n < 0) return false;
     } while (!text("福利中心").exists());
     if (id("tvName").exists() || id("userInfo").exists()) {
-        //l_log("成功打开“我”");
         nickname = id("tvName").findOne(500).text();
         l_log("当前账号：", nickname);
         return true;
@@ -225,7 +239,7 @@ function enterFreeCenter() {
         click("福利中心", 0);
         let m = 0;
         while (m < 5 && !textContains("完成任务得奖励").exists() && !text("去完成").exists()) {
-            sleep(1050);
+            sleep(300);
             m++;
         }
         if (m == 5 && text("福利中心").exists() && text("规则").exists()) {
@@ -571,13 +585,31 @@ function video_look(btn) {
             if (res_fast.length == 0) res_fast = cappad([0, 0, device.width, 1600]);
             for (let i = 0; i < res_fast.length; i++) {
                 let txt = res_fast[i].text;
-                // 兼容"观看X秒"和"看X秒"两种格式
-                let fast_match = txt.match(/(?:观看|看)\s*(\d+(?:\.\d+)?)\s*秒/);
+                // 匹配数字+秒，不限定前缀（避免OCR丢失"点击后"等文字）
+                let fast_match = txt.match(/(\d+(?:\.\d+)?)\s*秒/);
                 if (fast_match) {
                     let fast_sec = parseFloat(fast_match[1]);
                     if (fast_sec > 0 && fast_sec < 200) {
-                        ad_raw = fast_sec;
-                        l_log("核心区直接识别观看时长：", txt, fast_sec, "秒");
+                        // 等待3.5秒，再OCR左上角数字，对比是否减少来判断广告类型
+                        l_log("核心区识别到时长：", txt, fast_sec, "秒，等待3.5秒确认类型...");
+                        m = 3;
+                        sleep(3500);
+                        let res_check = cappad([0, 0, device.width, 550]);
+                        let sec_after = -1;
+                        for (let k = 0; k < res_check.length; k++) {
+                            let match2 = res_check[k].text.match(/(\d+(?:\.\d+)?)\s*秒/);
+                            if (match2) {
+                                sec_after = parseFloat(match2[1]);
+                                break;
+                            }
+                        }
+                        if (sec_after >= 0 && sec_after < fast_sec) {
+                            l_log("倒计时递减（" + fast_sec + "→" + sec_after + "），确认为观看类型");
+                            ad_raw = fast_sec;
+                        } else {
+                            l_log("倒计时未变（" + fast_sec + "→" + sec_after + "），确认为点击后看类型");
+                            ad_clicknewpage = fast_sec;
+                        }
                         break;
                     }
                 }
@@ -597,7 +629,7 @@ function video_look(btn) {
         }
 
         if (ad_raw > -1) {
-            l_verbose("已识别广告时长：", ad_raw, "秒，继续正常缓冲流程");
+            break;
         }
 
         while (wp == "freecenter" || (wp == "adframe" && !textContains("跳过").exists() && !textContains("秒").exists())) {
@@ -632,7 +664,7 @@ function video_look(btn) {
             if (currentActivity() != "com.qq.e.tg.RewardvideoPortraitADActivity" && wp == "freecenter") btn.click();
         }
         m++;
-        if (m > 6) { // 缩短整体识别轮次，从 10 减为 6
+        if (m > 5) { 
             l_warn("识别超时，切换旧版逻辑");
             break;
         }
@@ -703,7 +735,7 @@ function video_look(btn) {
                     // 1. 优先 OCR 识别特定范围或关键词按钮
                     // 针对微信小游戏：1888-2050 范围优先
                     let wechatKeywords = ["微信", "小游戏", "立即玩", "开始玩", "立即获得", "立即抢购", "立即下载"];
-                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完", "活动规则", "详情见"];
+                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完"];
                     
                     for (let i = 0; i < res_new.length; i++) {
                         let b = res_new[i].bounds;
@@ -791,9 +823,7 @@ function video_look(btn) {
                         let curr_pkg = currentPackage();
 
                         if (curr_pkg == qidianPackageName) {
-                            l_log("仍留在起点 App 内，执行手势返回关闭页面");
-                            back();
-                            sleep(500);
+                            l_log("仍留在起点 App 内，继续等待");
                         } else {
                             l_info("检测到已成功跳转至第三方应用：", getAppName(curr_pkg));
                         }
@@ -854,70 +884,61 @@ function video_look(btn) {
         // "点击/玩"类型广告会跳转到新页面，优先执行直接切换回起点，替代模拟返回
         if (isClickNewPage) {
             sleep(1000);
-            let p_now = currentPackage();
-
-            // 权限管理弹窗是起点内的弹窗，等待剩余时间后直接手势返回
-            if (p_now.indexOf("permissioncontroller") > -1) {
-                l_verbose("点击/玩类型遇到权限管理弹窗，等待剩余时间后手势返回");
-                let waitSec = Math.max(adSec - sec - 2, 0);
-                while (waitSec > 0) { sleep(1000); waitSec--; }
+            // 权限管理弹窗：直接 back 关闭，不需要切换回起点
+            if (currentPackage().indexOf("permission") > -1) {
+                l_verbose("权限管理弹窗，执行 back 关闭");
                 back();
-                sleep(1500);
-            } else if (p_now != qidianPackageName) {
-                // 先切换回起点
+                sleep(500);
+            } else if (currentPackage() != qidianPackageName) {
                 l_verbose("点击/玩类型，执行直接切换回起点");
                 launchQidian();
                 sleep(2000); // 等待起点完全切换到前台
-                // 只在起点内且不在福利中心时才返回（关闭内部浏览器页面）
-                if (currentPackage() == qidianPackageName && wherePage() != "freecenter") {
-                    l_verbose("已回到起点，执行手势返回关闭页面");
-                    back();
-                    sleep(1500);
-                } else if (currentPackage() != qidianPackageName) {
-                    l_warn("切换后仍未回到起点，执行保底返回");
-                    back();
-                    sleep(500);
-                }
+            }
+            // 只在起点内且不在福利中心时才返回（关闭内部浏览器页面）
+            if (wherePage() != "freecenter" && currentPackage().indexOf("permission") == -1) {
+                l_verbose("执行返回关闭页面");
+                back();
             }
 
             if (isSlideTask) {
                 l_verbose("滑动任务，执行切换");
                 swipe(device.width * 0.8, device.height / 2, device.width * 0.2, device.height / 2, 500);
-                sleep(2000);
+                sleep(1500);
             }
         }
 
         // 看完点X
         let n = 0;
         let try_back_time = 2;
+        let max_click_rounds = 5; // 防止杀后台后恭喜弹窗消失导致无限点X
         let xr = device.width - t_click_x_right, yt = closeButtonBottom - t_click_y_top;
         let xc = xr, yc = yt;
         do {
             n++;
+            // 防止杀后台导致 btn 失效后无限循环：如果已在福利中心，直接跳出
+            if (n > try_back_time + 3 && wherePage() == "freecenter") {
+                l_log("已回到福利中心，恭喜弹窗可能已消失，跳出点X循环");
+                break;
+            }
+            if (n > max_click_rounds) {
+                l_error("点X超过 " + max_click_rounds + " 轮，可能杀后台导致异常，跳出");
+                break;
+            }
 
-            // 权限管理弹窗：不做任何额外操作，直接等待剩余秒数（与正常看广告一致）
-            if (currentPackage().indexOf("permissioncontroller") > -1) {
-                l_verbose("权限管理弹窗，直接等待" + adSec + "秒");
-                debugDelay = 3;
-                let waitSec = adSec;
-                while (waitSec > 0) {
-                    sleep(1000);
-                    waitSec--;
-                }
-                debugDelay = 1;
+            // 权限管理弹窗：统一在循环开头处理
+            if (currentPackage().indexOf("permission") > -1) {
+                l_verbose("权限管理弹窗，执行 back 关闭");
+                back();
+                sleep(500);
                 continue;
             }
 
             if (n < try_back_time) {
-                // 权限管理弹窗：直接右滑返回，不需要切换回起点（弹窗在起点内）
-                if (currentPackage().indexOf("permissioncontroller") > -1) {
-                    l_verbose("权限管理弹窗，直接右滑返回");
-                    back();
-                    sleep(1000); // 等待弹窗消失
-                } else if (currentPackage() != qidianPackageName) {
+                if (currentPackage() != qidianPackageName) {
                     l_verbose("执行直接切换回起点");
                     launchQidian();
-                    sleep(800);
+                    sleep(500);
+                    back();
                 }
             }
 
@@ -927,21 +948,13 @@ function video_look(btn) {
 
             // 只有当：不是跳转类广告，且包名已跳出起点，且没识别到广告/浏览器页，才判定为界面不对
             if (!isClickNewPage && p_now != qidianPackageName && wp_recheck != "adframe" && wp_recheck != "browser") {
-                // 权限管理弹窗：直接右滑返回，不需要切换回起点
-                if (p_now.indexOf("permissioncontroller") > -1) {
-                    l_verbose("权限管理弹窗，直接右滑返回");
-                    back();
-                    sleep(1000); // 等待弹窗消失
-                    n = 0;
-                } else {
-                    l_verbose("界面不对0 (跳出起点): " + wp_recheck + " [" + p_now + "]");
-                    n = 0;
-                    home();
-                    console.hide();
-                    cmdIsDisplay = false;
-                    sleep(900);
-                    launchQidian();
-                }
+                l_verbose("界面不对0 (跳出起点): " + wp_recheck + " [" + p_now + "]");
+                n = 0;
+                home();
+                console.hide();
+                cmdIsDisplay = false;
+                sleep(800);
+                launchQidian();
             }
 
             if (n >= try_back_time) {
@@ -974,19 +987,6 @@ function video_look(btn) {
             if (!cmdIsDisplay) showCon();
 
             if (!btn.parent()) {
-                // 权限管理弹窗：不做任何额外操作，直接等待剩余秒数（与正常看广告一致）
-                if (currentPackage().indexOf("permissioncontroller") > -1) {
-                    l_verbose("权限管理弹窗，直接等待" + adSec + "秒");
-                    debugDelay = 3;
-                    let waitSec = adSec;
-                    while (waitSec > 0) {
-                        sleep(1000);
-                        waitSec--;
-                    }
-                    debugDelay = 1;
-                    continue;
-                }
-
                 // 等待页面稳定后再识别续看，避免返回过程中误识别
                 sleep(500);
 
@@ -1071,7 +1071,7 @@ function video_look(btn) {
 
                     // 识别“续”的按钮：需要识别中下部区域 (Y > 1200)
                     let res_btn = cappad([0, 1200, device.width, device.height - 1200]);
-                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完", "活动规则", "详情见"];
+                    let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完"];
                     let clicked_resume = false;
 
                     for (let i = 0; i < res_btn.length; i++) {
@@ -1114,9 +1114,22 @@ function video_look(btn) {
                     }
 
                     if (isClickNewPage) {
-                        l_verbose("续看结束，直接切换回起点");
-                        launchQidian();
-                        sleep(2000);
+                        // 权限管理弹窗：直接 back 关闭
+                        if (currentPackage().indexOf("permission") > -1) {
+                            l_verbose("续看结束，权限管理弹窗，back关闭");
+                            back();
+                            sleep(500);
+                        } else if (currentPackage() != qidianPackageName) {
+                            l_verbose("续看结束，执行直接切换回起点");
+                            launchQidian();
+                            sleep(2000);
+                        }
+                        // 回到起点后关闭内部页面
+                        if (wherePage() != "freecenter" && currentPackage().indexOf("permission") == -1) {
+                            l_verbose("执行返回关闭页面");
+                            back();
+                            sleep(500);
+                        }
                         isClickNewPage = false; // 执行完后重置
                     }
                     n = 0;
@@ -1324,7 +1337,7 @@ function video_look(btn) {
     } 
     clickIknown();
     l_verbose("广告", adCount, "结束");
-    sleep(1000);
+    sleep(100);
 }
 function read_book(min) {
     let second = Math.floor(min * 60); // 确保是整数，使取模 % 逻辑生效
@@ -1706,7 +1719,7 @@ function clickIknown() {
         let a = "恭喜获得";
         if (t1.substring(0, a.length) == a) addReceived(t1.substring(a.length));
 
-        sleep(100);
+        sleep(800);
         // 优先精确匹配"知道了"，再尝试其他常见按钮
         let iknow = text("知道了").findOne(800) || text("知道啦").findOne(200);
         if (!iknow) iknow = textContains("知道").findOne(500);
@@ -1860,7 +1873,7 @@ if (debug || true) { // 默认开启包名检测逻辑
                 let p = currentPackage();
                 // 包名检测逻辑：在起点 APP 外停留超过 20 秒自动返回
                 // 增加权限管理相关的包名白名单，防止在跳转确认阶段被误杀
-                if (p != qidianPackageName && p != autojsPackage && p != "android" && p != "com.android.settings" && p.indexOf("permissioncontroller") == -1) {
+                if (p != qidianPackageName && p != autojsPackage && p != "android" && p != "com.android.settings" && p.indexOf("permission") == -1) {
                     // 如果是"点击/玩"类型广告正在等待倒计时，跳过自动返回，避免任务中断
                     if (isClickNewPage && adCount > 0) {
                         outPackageStartTime = 0; 
@@ -1892,14 +1905,12 @@ if (debug || true) { // 默认开启包名检测逻辑
 
 
 // 打开起点
-openQidian();
+let alreadyInFreeCenter = openQidian();
 l_log(longdash);
 sleep(500);
 
-// 进入福利中心（openQidian()已判断则跳过）
-if (wherePage() != "freecenter") {
-    enterFreeCenter();
-}
+// 进入福利中心
+if (!alreadyInFreeCenter) enterFreeCenter();
 l_log(longdash);
 sleep(1000);
 
@@ -1909,7 +1920,7 @@ try {
         l_log("开始兑换");
         if (exchange() == 0) l_log("无兑换");
         l_log(longdash);
-        sleep(2000);
+        sleep(1000);
     }
 
     // 当日阅读5分钟（含去阅读任务）
@@ -1935,7 +1946,7 @@ try {
                     let num = 0;
                     for (let j = 0; j < s1.length; j++) if (s1[j].indexOf("再读") > -1) num = s1[j].replace(/[^\d.]/g, "") * 1;
                     robustClick(aa[ii]);
-                    sleep(2000);
+                    sleep(1000);
 
                     // 识别是否跳转到了主页/书架
                     let wp = wherePage();
@@ -1988,7 +1999,7 @@ try {
                                     l_verbose("但无 加入 弹窗");
                                     back();
                                 }
-                                sleep(2000);
+                                sleep(1000);
                             }
                             break;
                         }
@@ -2009,45 +2020,10 @@ try {
 
     // 开始看广告
     let targetBtn = ["看视频", "去完成"]; // 目标按钮字符
-    let bonusBtnTexts = ["领奖励", "领积分"]; // 可领按钮，与广告同屏处理
     let scrollCount = 0;
     let gameTaskDone = false; // 广告滚动时检测并执行游戏任务
-    let bonusChecked = false; // 只在第一次扫描时领奖励，避免反复重置scrollCount
     let adRetryCount = 0; // 广告识别失败重试计数
     while (true) {
-        // 先检查当前屏幕有无可领奖励，避免后面再单独滚动查找
-        if (!bonusChecked) {
-        bonusChecked = true;
-        for (let bj = 0; bj < bonusBtnTexts.length; bj++) {
-            let btnt = bonusBtnTexts[bj];
-            if (text(btnt).exists()) {
-                let btn = text(btnt).find();
-                for (let bi = 0; bi < btn.length; bi++) {
-                    l_verbose(shortdash);
-                    freeCenterScrolled = scrollShowButton(freeCenterScrolled, btn[bi]);
-                    let btn_now = refreshView(btn[bi]);
-                    let desc = getDescriptionOnLeft(btn_now).split("\n")[0];
-                    l_verbose(desc);
-                    robustClick(btn_now);
-                    scrollCount = 0; // 领到奖励，重置滚动计数
-                    let c1 = 0;
-                    for (let ii = 0; ii < 3; ii++) {
-                        sleep(300);
-                        c1 = clickIknown();
-                        if (c1) break;
-                    }
-                    if (!c1) {
-                        btn_now = refreshView(btn[bi]);
-                        if (btn_now && btn_now.text() == btnt) {
-                            l_verbose("领取按钮仍在，可能失败");
-                        }
-                    }
-                    break; // 领完一个重新扫描，防止UI变化
-                }
-            }
-        }
-        } // end if (!bonusChecked)
-
         let foundOnThisScreen = false;
         let anyValidOnScreen = false;
 
@@ -2056,6 +2032,14 @@ try {
             if (!text(target).exists()) continue;
             let aa = text(target).find();
             for (let ii = aa.length - 1; ii > -1; ii--) {
+                // 快速过滤：先检查按钮自身及父节点的文本，避免对不相关按钮做深度遍历
+                let quickCheck = "";
+                let parent = aa[ii].parent();
+                if (parent) quickCheck = getTextOfView(parent);
+                if (quickCheck.indexOf("广告") == -1 && quickCheck.indexOf("限时") == -1 && quickCheck.indexOf("加点") == -1 && quickCheck.indexOf("市场") == -1) {
+                    continue;
+                }
+
                 let s = getDescriptionOnLeft(aa[ii]);
                 if (s == "") {
                     // 如果描述为空，尝试直接检查父容器中是否包含“广告”等字样
@@ -2110,7 +2094,7 @@ try {
                             }
                             if (rs.indexOf("广告") > -1 || rs.indexOf("限时") > -1 || rs.indexOf("加点") > -1) {
                                 robustClick(reBtn[ri]);
-                                sleep(2000);
+                                sleep(1000);
                                 video_look(reBtn[ri]);
                                 reFound = true;
                                 break;
@@ -2210,11 +2194,10 @@ try {
             l_verbose(shortdash);
             freeCenterScrolled = scrollShowButton(freeCenterScrolled, btn[i]);
             let btn_now = refreshView(btn[i]);
-            l_verbose(getDescriptionOnLeft(btn_now));
             robustClick(btn_now);
             bonusNum++;
             let c1 = 0;
-            for (let ii = 0; ii < 5; ii++) {
+            for (let ii = 0; ii < 3; ii++) {
                 sleep(200);
                 c1 = clickIknown();
                 if (c1) break;
@@ -2223,24 +2206,19 @@ try {
                 btn_now = refreshView(btn[i]);
                 if (btn_now && btn_now.text() == btnt) {
                     l_error("似乎领取失败");
-                } else {
-                    let d1 = getDescriptionOnLeft(btn_now).split("\n");
-                    d1.shift();
-                    l_verbose(d1.join("\n"));
                 }
             }
         }
     }
     if (bonusNum == 0) l_log("无");
     l_log(longdash);
-    sleep(1000);
+    sleep(500);
 
     l_log.apply(null, reviewResults());
     home();
     l_info("脚本正常结束");
     l_verbose("控制台3秒后自动关闭");
     l_log("记得清理Autox.js后台");
-    sleep(1000);
     console.hide();
 } catch (err) {
     l_error(err.message);

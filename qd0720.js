@@ -76,44 +76,51 @@
         let cp = currentPackage();
         let ca = currentActivity();
         
-        // 优先通过包名和 Activity 快速过滤
+        // 权限管理弹窗快速识别
+        if (cp.indexOf("permission") > -1 || cp.indexOf("packageinstaller") > -1) {
+            return "permission";
+        }
+
+        // 优先通过包名快速过滤非起点页面，避免遍历起点控件
         if (cp != qidianPackageName && cp != "com.android.settings" && cp != autojsPackage) {
             return "isNotQidain";
         }
         
         // 广告 Activity 识别（最快）
         if (ca.indexOf("RewardvideoPortraitADActivity") > -1 || ca.indexOf("RewardVideoActivity") > -1 || ca.indexOf("AdActivity") > -1) {
-        return "adframe";
+            return "adframe";
         }
 
-        // 识别页面特征，减少 exists() 的并发搜索
-        if (text("书架").exists() && text("精选").exists()) {
-            return "index";
-        }
+        // 福利中心（最频繁访问的目标页面，优先识别）
         if (textContains("完成任务得奖励").exists() && text("去完成").exists()) {
             return "freecenter";
         }
-        if (textContains("点击后看").exists() && textContains("任务").exists()) {
+
+        // 广告页面特征合并判断（减少多轮重复 exists 遍历）
+        if (text("跳过").exists() || textContains("观看视频").exists() || textContains("后看广告").exists() || textContains("秒后获取奖励").exists() || textContains("点击后看").exists() || (textContains("秒").exists() && textContains("奖励").exists()) || (textContains("点击后").exists() && textContains("任务").exists()) || textContains("试玩").exists() || textContains("玩小游戏").exists() || textContains("小游戏").exists()) {
             return "adframe";
         }
-        if (textContains("后看广告").exists() || textContains("秒后获取奖励").exists() || textContains("观看视频").exists()) {
-            return "adframe";
+
+        // 首页
+        if (text("书架").exists() && text("精选").exists()) {
+            return "index";
         }
-        if (textContains("点击后").exists() && (textContains("秒").exists() || textContains("奖励").exists())) {
-            return "adframe";
-        }
-        if (text("跳过").exists() || (textContains("秒").exists() && textContains("奖励").exists())) {
-            return "adframe";
-        }
+
+        // 签到详情
         if (text("签到详情").exists() || text("连签有礼").exists()) {
             return "signdetail";
         }
+
+        // 游戏中心
         if (text("阅游戏").exists() && text("在线玩").exists()) {
             return "gamecenter";
         }
+
+        // 浏览器容器
         if (id("browser_container").exists()) {
             return "browser";
         }
+
         return "";
     }
     function launchQidian() {
@@ -159,6 +166,9 @@
             } else if (a.indexOf("activity.QDReader") > -1 || a.indexOf("chapter") > -1 || a.indexOf("new_msg") > -1) {
                 l_verbose("非主页Activity，尝试返回");
                 back();
+            } else if (wp == "permission") {
+                l_verbose("检测到权限弹窗，尝试返回");
+                back();
             } else if (wp == "isNotQidain") {
                 l_verbose("不在起点App内，尝试拉起");
                 launchQidian();
@@ -169,7 +179,7 @@
             sleep(500);
             closeDialogs();
             if (n > 20 && currentPackage() != qidianPackageName) break;
-        } while (wp == "" || wp == "isNotQidain");
+        } while (wp == "" || wp == "isNotQidain" || wp == "permission");
         
         // 如果已经在福利中心相关页面，跳过等待和后续逻辑
         if (wp == "freecenter" || wp == "signdetail") {
@@ -520,9 +530,10 @@
         let isSlideTask = false; // 是否为滑动任务
         let has_slide_reset = false; // 标记是否发生了滑动重置
 
-        // 引入外层大循环：用于处理滑动任务后的状态重置
-        // 当发生滑动任务需要重新识别时，通过 continue ad_main_loop; 跳回这里
-        ad_main_loop: while (true) {
+        try {
+            // 引入外层大循环：用于处理滑动任务后的状态重置
+            // 当发生滑动任务需要重新识别时，通过 continue ad_main_loop; 跳回这里
+            ad_main_loop: while (true) {
             ad_raw = -1; ad_clicknewpage = -1; // 每次循环重置
             let m = 0;
             has_slide_reset = false; // 每次进入主循环重置标记
@@ -606,7 +617,7 @@
                             break;
                         }
                     }
-                    if (txt.indexOf("秒") > -1 || txt.indexOf("完成") > -1 || txt.indexOf("任务") > -1 || txt.indexOf("滑动") > -1 || txt.indexOf("奖励") > -1) {
+                    if (txt.indexOf("秒") > -1 || txt.indexOf("完成") > -1 || txt.indexOf("任务") > -1 || txt.indexOf("滑动") > -1 || txt.indexOf("奖励") > -1 || txt.indexOf("试玩") > -1 || txt.indexOf("小游戏") > -1) {
                         l_log("核心区快速识别成功：", txt);
                         m = 3; 
                         break;
@@ -621,11 +632,13 @@
                 }
             }
 
-            if (ad_raw > -1) {
+            // 如果快速识别已确定广告类型与时长，直接跳出识别循环进入倒计时
+            if (ad_raw > -1 || ad_clicknewpage > -1) {
                 break;
             }
 
-            while (wp == "freecenter" || (wp == "adframe" && !textContains("跳过").exists() && !textContains("秒").exists())) {
+            // 仅在尚未识别出广告特征（m == 0）且界面还在加载缓冲时进行等待
+            while (m == 0 && (wp == "freecenter" || (wp == "adframe" && !textContains("跳过").exists() && !textContains("秒").exists()))) {
                 sleep(1000);
                 blocked_check++;
 
@@ -648,8 +661,8 @@
                 if (textContains("播放将消耗流量").exists()) click("继续播放", 0);
                 
                 wp = wherePage();
-                // 如果缓冲超过 5 秒还没出现倒计时，说明可能需要点击激活
-                if (wp == "adframe" && blocked_check >= 5) {
+                // 如果缓冲超过 3 秒还没出现倒计时，说明可能需要点击激活或进入任务识别模式
+                if (wp == "adframe" && blocked_check >= 3) {
                     l_verbose("缓冲超时，尝试进入任务识别模式进行激活");
                     m = 2; // 设置 m 使得退出循环后 m++ 变为 3，从而触发下方的任务识别
                     break;
@@ -681,7 +694,7 @@
                 if (!isSlideTask) {
                     for (let i = 0; i < res.length; i++) {
                         let txt = res[i].text;
-                        if (txt.indexOf("得奖励") > -1 || txt.indexOf("小游戏") > -1 || txt.indexOf("完成") > -1 || txt.indexOf("任务") > -1 || txt.indexOf("点击后") > -1 || txt.indexOf("秒") > -1 || txt.indexOf("继续") > -1) {
+                        if (txt.indexOf("得奖励") > -1 || txt.indexOf("小游戏") > -1 || txt.indexOf("试玩") > -1 || txt.indexOf("完成") > -1 || txt.indexOf("任务") > -1 || txt.indexOf("点击后") > -1 || txt.indexOf("秒") > -1 || txt.indexOf("继续") > -1) {
                             let sec = txt.replace(/[^\d.]/g, "") * 1;
                             // 如果包含“已完成”且数字很小，通常是任务序号，不作为倒计时
                             if (txt.indexOf("已完成") > -1 && sec > 0 && sec < 10) {
@@ -691,11 +704,11 @@
                                 l_verbose(sec, "任务时间异常，限制为 15 秒");
                                 sec = 15;
                             }
-                            if (txt.indexOf("点击") > -1 && res[i].bounds.top < 1000) {
-                                l_log("检测到点击任务提示：", sec || 15);
+                            if ((txt.indexOf("点击") > -1 || txt.indexOf("试玩") > -1 || txt.indexOf("小游戏") > -1) && res[i].bounds.top < 1000) {
+                                l_log("检测到点击/试玩任务提示：", sec || 15);
                                 ad_clicknewpage = sec || 17; 
                                 break;
-                            } else if (txt.indexOf("点击") > -1 || txt.indexOf("玩") > -1) {
+                            } else if (txt.indexOf("点击") > -1 || txt.indexOf("玩") > -1 || txt.indexOf("试玩") > -1) {
                                 l_log("点/玩类型：", sec || 15);
                                 ad_clicknewpage = sec || 15;
                                 break;
@@ -1317,6 +1330,10 @@
             break ad_main_loop;
         } 
         clickIknown();
+        } finally {
+            isClickNewPage = false; // 无论正常结束还是异常退出，强制重置标记
+            debugDelay = 1;         // 恢复看护线程正常检测频率
+        }
         l_verbose("广告", adCount, "结束");
         sleep(100);
     }
@@ -1443,12 +1460,12 @@
     }
     function cappad(region) {
         let cid = cmdIsDisplay;
-        // 只有当识别区域可能被控制台遮挡时，才隐藏控制台
-        // 默认控制台位置 c_pos[0] 在顶部，c_pos[1] 在底部
+        // 只有当识别区域明确完全在控制台之外时才不隐藏，否则一律隐藏以防遮挡识别文字
         let needHide = cid;
         if (region && cid) {
-            // 如果识别区域在底部 (y > 2000)，而控制台在顶部 (closeButtonBottom 附近)，则无需隐藏
-            if (region[1] > closeButtonBottom + 200) { 
+            // 控制台高度大约 500~600，顶部位置约在 closeButtonBottom(550) 附近延伸
+            // 如果识别区域在底部 (y >= 1200)，而控制台在顶部，则无需隐藏
+            if (region[1] >= 1200) { 
                 needHide = false; 
             }
         }
@@ -1456,7 +1473,7 @@
         if (needHide) {
             console.hide();
             cmdIsDisplay = false;
-            sleep(50);
+            sleep(100); // 留足 100ms 让控制台窗口完全消失
         }
         
         let capimg = captureScreen();
@@ -2013,8 +2030,12 @@
         let scrollCount = 0;
         let gameTaskDone = false; // 广告滚动时检测并执行游戏任务
         let adRetryCount = 0; // 广告识别失败重试计数
-        while (true) {
+        let totalAdLoops = 0; // 总循环防护计数
+        let noProgressCount = 0; // 连续无有效进展计数
+        while (totalAdLoops < 40) {
+            totalAdLoops++;
             let foundOnThisScreen = false;
+            let currentTaskSuccess = true;
 
             for (let i = 0; i < targetBtn.length; i++) {
                 let target = targetBtn[i];
@@ -2096,17 +2117,28 @@
                         }
                         if (ad_raw == -1 && ad_clicknewpage == -1) {
                             l_error("广告识别失败，已重试" + adRetryCount + "次，放弃此任务");
+                            currentTaskSuccess = false;
                         }
                     }
                     if (c == 2) jumpMarket(aa[ii]);
                     foundOnThisScreen = true;
-                    scrollCount = 0; // 找到了，重置滚动
+                    if (currentTaskSuccess) {
+                        scrollCount = 0; // 任务成功，重置滚动
+                        noProgressCount = 0;
+                    } else {
+                        noProgressCount++;
+                        if (noProgressCount >= 2) {
+                            l_warn("连续任务异常，尝试滑动跳过当前卡点...");
+                            scrollCount++;
+                        }
+                    }
+                    sleep(800); // 等待页面列表刷新
                     break; 
                 }
                 if (foundOnThisScreen) break;
             }
 
-            if (foundOnThisScreen) continue; 
+            if (foundOnThisScreen && noProgressCount < 2) continue; 
 
             if (scrollCount < 3) {
                 l_verbose("当前屏幕未发现新广告，尝试向下滑动寻找...");

@@ -73,6 +73,19 @@
     console.verbose("建议重启手机或清理手机后再运行。");
     l_log(longdash);
 
+    function isIgnoredOrFloatingApp(pkg) {
+        if (!pkg) return false;
+        if (pkg == qidianPackageName || pkg == autojsPackage || pkg == "android" || pkg == "com.android.settings") return true;
+        if (pkg.indexOf("permission") > -1 || pkg.indexOf("packageinstaller") > -1) return true;
+        let appName = "";
+        try { appName = getAppName(pkg) || ""; } catch (e) {}
+        let floatingKeywords = ["李跳跳", "游戏助手", "悬浮", "输入法", "SystemUI", "systemui", "Gboard", "录屏", "助手", "弹窗"];
+        for (let i = 0; i < floatingKeywords.length; i++) {
+            if (appName.indexOf(floatingKeywords[i]) > -1 || pkg.indexOf(floatingKeywords[i]) > -1) return true;
+        }
+        return false;
+    }
+
     function wherePage() {
         let cp = currentPackage();
         let ca = currentActivity();
@@ -82,11 +95,6 @@
             return "permission";
         }
 
-        // 优先通过包名快速过滤非起点页面，避免遍历起点控件
-        if (cp != qidianPackageName && cp != "com.android.settings" && cp != autojsPackage) {
-            return "isNotQidain";
-        }
-        
         // 广告 Activity 识别（最快）
         if (ca.indexOf("RewardvideoPortraitADActivity") > -1 || ca.indexOf("RewardVideoActivity") > -1 || ca.indexOf("AdActivity") > -1) {
             return "adframe";
@@ -98,7 +106,7 @@
         }
 
         // 广告页面特征合并判断（减少多轮重复 exists 遍历）
-        if (text("跳过").exists() || textContains("观看视频").exists() || textContains("后看广告").exists() || textContains("秒后获取奖励").exists() || textContains("点击后看").exists() || (textContains("秒").exists() && textContains("奖励").exists()) || (textContains("点击后").exists() && textContains("任务").exists())) {
+        if (text("跳过").exists() || textContains("观看视频").exists() || textContains("后看广告").exists() || textContains("秒后获取奖励").exists() || textContains("点击后看").exists() || (textContains("秒").exists() && textContains("奖励").exists()) || (textContains("点击后").exists() && textContains("任务").exists()) || textContains("恭喜你已获得奖励").exists()) {
             return "adframe";
         }
 
@@ -122,12 +130,23 @@
             return "browser";
         }
 
+        // 只有确实不是起点且不是悬浮窗/辅助工具干扰时，才判定为离开起点
+        if (cp != qidianPackageName && !isIgnoredOrFloatingApp(cp)) {
+            return "isNotQidain";
+        }
+
         return "";
     }
     function launchQidian() {
-        // 切换回起点
+        // 如果当前页面已经在广告页或福利中心等核心已知页面，无需盲目退桌面再拉起
+        let wp = wherePage();
+        if (wp == "adframe" || wp == "freecenter" || wp == "index" || wp == "signdetail") {
+            return;
+        }
+
         let p = currentPackage();
-        if (p != qidianPackageName) {
+        // 只有确实离开起点且不是悬浮窗辅助软件时，才退回桌面重新拉起
+        if (p != qidianPackageName && !isIgnoredOrFloatingApp(p)) {
             l_verbose("其它app：", getAppName(p));
             home();
             sleep(500);
@@ -541,91 +560,145 @@
             let a1 = ["查看", "详情", "立即", "继续", "下载", "了解", "更多", "领取", "去", "秒杀"];
             let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完", "抽奖机会"];
 
-            function clickAdButton() {
+            function clickAdButton(isResume) {
+                let stageTag = isResume ? "续看阶段" : "初次识别";
                 let clicked = false;
-                l_verbose("开始识别并点击激活按钮...");
+                l_verbose(stageTag + "开始识别并点击激活按钮...");
                 
-                // 识别按钮：扩大截取范围到 Y >= 1200，覆盖更多按钮位置
-                let res_new = cappad([0, 1200, device.width, device.height - 1200]); 
+                // 1. 区域限制：底部浮层卡片通常在屏幕 62% 以下，优先扫描底部区间，彻底避开上方活动规则背景
+                let startY = parseInt(device.height * 0.62);
+                let res_new = cappad([0, startY, device.width, device.height - startY]);
                 
-                // 如果截取范围内没有识别到文字，重试一次（按钮可能加载较慢）
+                // 如果未扫到文字，再向下稍微扩大到 55%
                 if (!res_new || res_new.length == 0) {
-                    l_verbose("首次OCR未识别到文字，重试...");
-                    sleep(500);
-                    res_new = cappad([0, 1200, device.width, device.height - 1200]);
+                    l_verbose("首次OCR未识别到文字，稍微扩大区域重试...");
+                    sleep(400);
+                    startY = parseInt(device.height * 0.55);
+                    res_new = cappad([0, startY, device.width, device.height - startY]);
                 }
-                
-                // 1. 优先 OCR 识别特定范围或关键词按钮
-                // 针对微信小游戏/试玩：1500-2150 范围优先
-                let wechatKeywords = ["微信", "小游戏", "立即玩", "开始玩", "立即获得", "立即抢购", "立即下载", "去微信", "玩游戏", "试玩"];
-                
-                for (let i = 0; i < res_new.length; i++) {
-                    let b = res_new[i].bounds;
-                    let txt = res_new[i].text;
-                    // 过滤黑名单
-                    if (strHasArr(txt, btnBlacklist)) continue;
-                    // 过滤太长的指令性文字（按钮通常不会过长）
-                    if (txt.length > 14) continue;
 
-                    // 如果在目标高度范围内，且包含关键词
-                    if (b.top >= 1500 && b.top <= 2150) {
-                        if (strHasArr(txt, wechatKeywords) || strHasArr(txt, ["立即", "点击", "去"])) {
-                            l_log("策略1-目标范围OCR匹配：", txt, "@", b.top);
-                            click(parseInt((b.left + b.right) / 2), parseInt((b.top + b.bottom) / 2));
+                // 典型CTA按钮白名单（最高优先级）
+                let exactButtons = [
+                    "去微信畅玩小游戏", "去微信玩小游戏", "去微信小游戏", "去微信看看", "去微信玩", 
+                    "去微信体验", "去微信", "立即体验", "立即试玩", "立即玩", "开始玩", 
+                    "马上玩", "试玩小游戏", "畅玩小游戏", "在线玩", "立即下载", "查看详情", 
+                    "立即获得", "去完成", "立即抢购", "立即查看", "免费领取", "立即领取", 
+                    "立即打开", "去看看", "立即参与"
+                ];
+
+                // 2. 文本有效性检测（过滤非按钮文字：数据指标、宣传语、规则、标题、应用名、标点、序号等）
+                let isInvalidBtn = function(txt) {
+                    if (!txt) return true;
+                    let clean = txt.replace(/\s+/g, "");
+                    // 如果直接命中按钮白名单，直接认定有效
+                    if (exactButtons.indexOf(clean) > -1) return false;
+
+                    if (clean.length < 2 || clean.length > 8) return true; // 按钮通常2-8个字
+                    // 包含标点符号、数字编号或特定符号直接排除（按钮绝不包含这些，如 1.、3亿 等）
+                    if (/[\d\.\-\!\！\[\]\(\)\（\）\,\，\。\、\:\：\?\？\<\>\《\》\￥\¥\+]/.test(clean)) return true;
+                    
+                    // 严格排除应用名、规则、背景说明、数据指标、宣传语等黑名单
+                    let blacklist = [
+                        "点击后", "任务中", "已成功", "获得奖励", "可得奖励", "秒后", "看完", "抽奖机会", 
+                        "详情页", "第三方应用", "第三方", "广告", "版权", "用户", "新人", "活动", "规则", 
+                        "标准", "评判", "下载APP", "下载App", "京东", "淘宝", "拼多多",
+                        "包邮", "谁懂", "限一单", "购买", "商品", "当场", "享受", "福利", "复购", "单人", 
+                        "秒杀", "立减", "可获得",
+                        // 排除宣传噱头与数据指标（针对“3亿玩家推荐游戏”、“在玩10万人+”、“人气榜Top10”等）
+                        "亿", "万", "玩家", "推荐", "极品", "条目", "人气", "排行榜", "在玩", "榜"
+                    ];
+                    for (let i = 0; i < blacklist.length; i++) {
+                        if (clean.indexOf(blacklist[i]) > -1) return true;
+                    }
+
+                    // 如果带有“小游戏”或“游戏”，必须带有动作前缀（如“去微信/试玩/畅玩/玩/在线”），否则视为应用名排除
+                    if (clean.indexOf("游戏") > -1) {
+                        let hasAction = false;
+                        let actionWords = ["去微信", "试玩", "畅玩", "玩", "在线"];
+                        for (let a = 0; a < actionWords.length; a++) {
+                            if (clean.indexOf(actionWords[a]) > -1) {
+                                hasAction = true;
+                                break;
+                            }
+                        }
+                        if (!hasAction) return true;
+                    }
+
+                    return false;
+                };
+
+                // 3. 优先级匹配
+                // 策略1：精确匹配完整的典型CTA按钮文本
+                for (let i = 0; i < res_new.length; i++) {
+                    let clean = res_new[i].text.replace(/\s+/g, "");
+                    if (exactButtons.indexOf(clean) > -1) {
+                        let b = res_new[i].bounds;
+                        if (b.top >= parseInt(device.height * 0.62)) {
+                            l_log(stageTag + "策略1-精准匹配按钮：", clean, "@ (" + b.centerX() + "," + b.centerY() + ")");
+                            click(b.centerX(), b.centerY());
                             clicked = true;
                             break;
                         }
                     }
                 }
 
-                // 2. 识别 Y >= 1500 的其他高优先级按钮
+                // 策略2：前缀动词短语匹配（以“立即/去微信/去/开始/点击/免费”开头且通过严格过滤）
                 if (!clicked) {
-                    let priorityBtns = ["去微信", "立即", "点击详情", "立即获得", "去完成", "立即抢购", "开始玩", "立即玩", "玩小游戏"];
-                    for (let p = 0; p < priorityBtns.length; p++) {
-                        for (let i = 0; i < res_new.length; i++) {
-                            let txt = res_new[i].text;
-                            if (strHasArr(txt, btnBlacklist)) continue;
-                            if (txt.length > 14) continue;
-
-                            if (txt.indexOf(priorityBtns[p]) > -1 && res_new[i].bounds.top >= 1500) {
-                                let b = res_new[i].bounds;
-                                l_log("策略2-高优先级OCR匹配：", txt);
-                                click(parseInt((b.left + b.right) / 2), parseInt((b.top + b.bottom) / 2));
+                    let prefixes = ["立即", "去微信", "去", "开始", "点击", "免费"];
+                    for (let i = 0; i < res_new.length; i++) {
+                        let clean = res_new[i].text.replace(/\s+/g, "");
+                        if (isInvalidBtn(clean)) continue;
+                        
+                        let hasPrefix = false;
+                        for (let p = 0; p < prefixes.length; p++) {
+                            if (clean.startsWith(prefixes[p])) {
+                                hasPrefix = true;
+                                break;
+                            }
+                        }
+                        if (hasPrefix) {
+                            let b = res_new[i].bounds;
+                            if (b.top >= parseInt(device.height * 0.62)) {
+                                l_log(stageTag + "策略2-前缀动词匹配：", clean, "@ (" + b.centerX() + "," + b.centerY() + ")");
+                                click(b.centerX(), b.centerY());
                                 clicked = true;
                                 break;
                             }
                         }
-                        if (clicked) break;
                     }
                 }
 
-                // 3. 兜底 OCR：尝试识别其他可能的候选按钮（限制 Y >= 1500）
+                // 策略3：距离标准底部按钮位置最近的候选文本（排除非法词后）
                 if (!clicked) {
-                    res_new.sort((a, b) => {
-                        let distA = Math.sqrt(Math.pow((a.bounds.left + a.bounds.right) / 2 - fixedButtonPos.x, 2) + Math.pow((a.bounds.top + a.bounds.bottom) / 2 - fixedButtonPos.y, 2));
-                        let distB = Math.sqrt(Math.pow((b.bounds.left + b.bounds.right) / 2 - fixedButtonPos.x, 2) + Math.pow((b.bounds.top + b.bounds.bottom) / 2 - fixedButtonPos.y, 2));
-                        return distA - distB;
-                    });
+                    let candidates = [];
+                    let targetX = device.width / 2;
+                    let targetY = parseInt(device.height * 0.81);
 
                     for (let i = 0; i < res_new.length; i++) {
-                        let txt = res_new[i].text;
-                        if (txt.indexOf("第三方应用") > -1 || strHasArr(txt, btnBlacklist)) continue;
-                        if (txt.length < 2 || txt.length > 14) continue;
-
-                        if (strHasArr(txt, a1)) {
-                            let b = res_new[i].bounds;
-                            l_log("策略3-通用候选OCR匹配：", txt);
-                            click(parseInt((b.left + b.right) / 2), parseInt((b.top + b.bottom) / 2));
-                            clicked = true;
-                            break; 
+                        let clean = res_new[i].text.replace(/\s+/g, "");
+                        if (isInvalidBtn(clean)) continue;
+                        let b = res_new[i].bounds;
+                        if (b.top >= parseInt(device.height * 0.62)) {
+                            let dist = Math.hypot(b.centerX() - targetX, b.centerY() - targetY);
+                            candidates.push({ text: clean, bounds: b, dist: dist });
                         }
+                    }
+
+                    if (candidates.length > 0) {
+                        candidates.sort((a, b) => a.dist - b.dist);
+                        let best = candidates[0];
+                        l_log(stageTag + "策略3-空间邻近候选匹配：", best.text, "@ (" + best.bounds.centerX() + "," + best.bounds.centerY() + ")");
+                        click(best.bounds.centerX(), best.bounds.centerY());
+                        clicked = true;
                     }
                 }
 
-                // 4. 针对微信小游戏/试玩的固定位置尝试（1750-1960 范围）
+                // 策略4：保底固定位置点击（胶囊按钮位于屏幕水平居中，Y约为 81% 高度处）
                 if (!clicked) {
-                    l_log("策略4-目标范围固定位置点击...");
-                    click(device.width / 2, 1850); 
+                    let fallbackX = device.width / 2;
+                    let fallbackY = parseInt(device.height * 0.81);
+                    l_log(stageTag + "策略4-保底固定按钮位置点击 @ (" + fallbackX + "," + fallbackY + ")");
+                    click(fallbackX, fallbackY);
                     clicked = true;
                 }
 
@@ -646,6 +719,7 @@
                     // 跳转检测等待的时间从总倒计时中扣除
                     if (ad_clicknewpage > -1) ad_clicknewpage -= 3.5;
                 }
+                return clicked;
             }
             do {
             sleep(500);
@@ -894,18 +968,20 @@
             if (isClickNewPage) {
                 sleep(1000);
                 let curPkg = currentPackage();
+                let wpCur = wherePage();
                 // 权限管理弹窗：直接 back 关闭
                 if (curPkg.indexOf("permission") > -1 || curPkg.indexOf("packageinstaller") > -1) {
                     l_verbose("广告结束，检测到权限管理弹窗，直接 back 关闭");
                     back();
                     sleep(800);
-                } else if (curPkg != qidianPackageName) {
+                } else if (wpCur != "adframe" && wpCur != "freecenter" && curPkg != qidianPackageName && !isIgnoredOrFloatingApp(curPkg)) {
                     l_verbose("点击/玩类型，执行直接切换回起点");
                     launchQidian();
                     sleep(1200);
                 }
-                // 回到起点后关闭内部页面
-                if (wherePage() != "freecenter" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1) {
+                // 回到起点后关闭内部打开的落地页（若已在广告页或福利中心则无需返回）
+                wpCur = wherePage();
+                if (wpCur != "freecenter" && wpCur != "adframe" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1 && !isIgnoredOrFloatingApp(currentPackage())) {
                     l_verbose("执行返回关闭页面");
                     back();
                     sleep(800);
@@ -938,11 +1014,12 @@
 
                 if (n < try_back_time) {
                     let curPkgN = currentPackage();
+                    let wpN = wherePage();
                     if (curPkgN.indexOf("permission") > -1 || curPkgN.indexOf("packageinstaller") > -1) {
                         l_verbose("权限管理弹窗，back关闭");
                         back();
                         sleep(500);
-                    } else if (curPkgN != qidianPackageName) {
+                    } else if (wpN != "adframe" && wpN != "freecenter" && curPkgN != qidianPackageName && !isIgnoredOrFloatingApp(curPkgN)) {
                         l_verbose("执行直接切换回起点");
                         launchQidian();
                         sleep(500);
@@ -954,8 +1031,8 @@
                 let wp_recheck = wherePage();
                 let p_now = currentPackage();
 
-                // 只有当：不是跳转类广告，且包名已跳出起点，且没识别到广告/浏览器页，才判定为界面不对
-                if (!isClickNewPage && p_now != qidianPackageName && wp_recheck != "adframe" && wp_recheck != "browser") {
+                // 只有当：不是跳转类广告，且包名已跳出起点且不是悬浮窗辅助软件，且没识别到广告/浏览器/福利页，才判定为界面不对
+                if (!isClickNewPage && p_now != qidianPackageName && !isIgnoredOrFloatingApp(p_now) && wp_recheck != "adframe" && wp_recheck != "browser" && wp_recheck != "freecenter") {
                     l_verbose("界面不对0 (跳出起点): " + wp_recheck + " [" + p_now + "]");
                     n = 0;
                     home();
@@ -1072,29 +1149,8 @@
                             }
                         }
 
-                        // 识别“续”的按钮：需要识别中下部区域 (Y > 1200)
-                        let res_btn = cappad([0, 1200, device.width, device.height - 1200]);
-                        let clicked_resume = false;
-
-                        for (let i = 0; i < res_btn.length; i++) {
-                            let txt = res_btn[i].text;
-                            if (strHasArr(txt, btnBlacklist)) continue;
-                            if (txt.length > 14) continue;
-
-                            if (strHasArr(txt, a1) || strHasArr(txt, ["微信", "小游戏", "立即", "去"])) {
-                                let b = res_btn[i].bounds;
-                                l_log("续看阶段点击激活按钮：", txt);
-                                click(parseInt((b.left + b.right) / 2), parseInt((b.top + b.bottom) / 2));
-                                clicked_resume = true;
-                                break;
-                            }
-                        }
-                        
-                        // 兜底：如果 OCR 没点到，且是"点击/玩"类型，点一下保底位置
-                        if (!clicked_resume && isClickNewPage) {
-                            l_log("续看阶段-保底位置点击...");
-                            click(device.width / 2, 1850);
-                        }
+                        // 识别“续”的按钮：调用精准匹配与点击逻辑
+                        clickAdButton(true);
 
                         debugDelay = 3;
                         while (sec > 0) {
@@ -1118,17 +1174,19 @@
                         if (isClickNewPage) {
                             // 权限管理弹窗：直接 back 关闭
                             let curPkgResume = currentPackage();
+                            let wpResume = wherePage();
                             if (curPkgResume.indexOf("permission") > -1 || curPkgResume.indexOf("packageinstaller") > -1) {
                                 l_verbose("续看结束，权限管理弹窗，back关闭");
                                 back();
                                 sleep(500);
-                            } else if (curPkgResume != qidianPackageName) {
+                            } else if (wpResume != "adframe" && wpResume != "freecenter" && curPkgResume != qidianPackageName && !isIgnoredOrFloatingApp(curPkgResume)) {
                                 l_verbose("续看结束，执行直接切换回起点");
                                 launchQidian();
                                 sleep(2000);
                             }
-                            // 回到起点后关闭内部页面
-                            if (wherePage() != "freecenter" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1) {
+                            // 回到起点后关闭内部页面（若已在广告页或福利中心则无需返回）
+                            wpResume = wherePage();
+                            if (wpResume != "freecenter" && wpResume != "adframe" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1 && !isIgnoredOrFloatingApp(currentPackage())) {
                                 l_verbose("执行返回关闭页面");
                                 back();
                                 sleep(500);
@@ -1887,8 +1945,9 @@
                     
                     let p = currentPackage();
                     // 包名检测逻辑：在起点 APP 外停留超过 20 秒自动返回
-                    // 增加权限管理相关的包名白名单，防止在跳转确认阶段被误杀
-                    if (p != qidianPackageName && p != autojsPackage && p != "android" && p != "com.android.settings" && p.indexOf("permission") == -1 && p.indexOf("packageinstaller") == -1) {
+                    // 增加权限管理相关的包名白名单及悬浮窗辅助应用过滤，防止误杀
+                    let wpGuard = wherePage();
+                    if (p != qidianPackageName && !isIgnoredOrFloatingApp(p) && wpGuard != "adframe" && wpGuard != "freecenter") {
                         // 如果是"点击/玩"类型广告正在等待倒计时，跳过自动返回，避免任务中断
                         if (isClickNewPage && adCount > 0) {
                             outPackageStartTime = 0; 

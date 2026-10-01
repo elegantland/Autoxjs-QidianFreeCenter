@@ -100,7 +100,12 @@
             return "adframe";
         }
 
-        // 福利中心（最频繁访问的目标页面，优先识别）
+        // 网页/内嵌广告特征（在起点内部打开了商品落地页、H5网页、内置浏览器）
+                if (ca.indexOf("Web") > -1 || ca.indexOf("Browser") > -1 || ca.indexOf("H5") > -1 || ca.indexOf("LandPage") > -1 || ca.indexOf("AdLandingPage") > -1) {
+                    return "internal_web";
+                }
+
+                // 福利中心（最频繁访问的目标页面，优先识别）
         if (textContains("完成任务得奖励").exists() && text("去完成").exists()) {
             return "freecenter";
         }
@@ -236,22 +241,24 @@
             //方案三
             click(device.width - 100, device.height - 100);
         }
-        let n = 15;
-        do {
-            sleep(1000);
-            closeDialogs();
-            n--;
-            if (n < 0) return false;
-        } while (!text("福利中心").exists());
+        // 快速检测“福利中心”按钮是否出现（每 200ms 检查一次，最多等 6 秒，出现立即进入下一步）
+        let waited = 0;
+        while (!text("福利中心").exists() && waited < 30) {
+            sleep(200);
+            waited++;
+            if (waited % 5 == 0) closeDialogs();
+        }
+        if (!text("福利中心").exists()) return false;
+
         if (id("tvName").exists() || id("userInfo").exists()) {
-            let tv = id("tvName").findOne(500);
+            let tv = id("tvName").findOne(300);
             nickname = tv ? tv.text() : "";
             l_log("当前账号：", nickname);
             return true;
         }
         l_warn("未找到昵称，可能版本不一样");
         l_warn(wherePage(), currentPackage(), currentActivity());
-        return false;
+        return true; // 即使昵称未抓到，但已在“我”界面且找到了福利中心，允许继续
     }
     function enterFreeCenter() {
         if (wherePage() == "freecenter") {
@@ -311,13 +318,13 @@
         } else {
             l_error("没找到链接，无法进入签到日历");
         }
-        let d = className("android.widget.Button").text("去兑换 今日").findOne(500);
+        let d = className("android.widget.Button").text("去兑换 今日").findOne(1000);
         if (d) {
             // 今日是周日兑换
             l_verbose(shortdash);
             l_log(d.text());
             d.click();
-            sleep(1000);
+            sleep(1200);
             let btns = className("android.widget.TextView").text("兑换").find();
             if (btns.length > 0) {
                 let bigIndex = -1;
@@ -365,8 +372,8 @@
                             if (c1 > 0) setConPos(0);
                         }
                         n1++;
-                    } while (refreshView(btns[bigIndex]).text() == btns[bigIndex].text() && n1 < 5);
-                    if (refreshView(btns[bigIndex]).text() != btns[bigIndex].text()) {
+                    } while (refreshView(btns[bigIndex]) && refreshView(btns[bigIndex]).text() == btns[bigIndex].text() && n1 < 5);
+                    if (!refreshView(btns[bigIndex]) || refreshView(btns[bigIndex]).text() != btns[bigIndex].text()) {
                         showReceived(r1);
                         addReceived(r1.replace("兑换", ""));
                         result |= 0b10;
@@ -380,8 +387,32 @@
                 }
             }
         }
+
+        // 兑换成功后可能弹出“兑换成功/恭喜获得”弹窗，先处理弹窗
+        clickIknown();
+
+        // 页面层级恢复：从“兑换中心”或“签到日历”稳妥返回到福利中心
+        // 第一层：如果是点进“去兑换 今日”打开了新弹窗/页面，先退出兑换子页
+        l_verbose("退出兑换页面，返回签到日历...");
         back();
         sleep(1000);
+        clickIknown();
+
+        // 第二层：如果当前仍在签到日历或非福利中心页面，继续退回福利中心
+        let backCount = 0;
+        while (wherePage() != "freecenter" && backCount < 4) {
+            l_verbose("当前未在福利中心，执行返回 (" + (backCount + 1) + "/4)...");
+            back();
+            sleep(1000);
+            clickIknown();
+            backCount++;
+        }
+
+        if (wherePage() != "freecenter") {
+            l_warn("返回福利中心失败，尝试重新进入福利中心");
+            enterFreeCenter();
+        }
+
         return result;
     }
     function lottery() {
@@ -559,11 +590,21 @@
             has_slide_reset = false; // 每次进入主循环重置标记
             let a1 = ["查看", "详情", "立即", "继续", "下载", "了解", "更多", "领取", "去", "秒杀"];
             let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完", "抽奖机会"];
+            let failedCoords = []; // 记录本广告内已点击但未跳转的无效死坐标（防止死磕同一个点）
 
             function clickAdButton(isResume) {
                 let stageTag = isResume ? "续看阶段" : "初次识别";
                 let clicked = false;
+                let lastTappedPoint = null;
                 l_verbose(stageTag + "开始识别并点击激活按钮...");
+
+                // 辅助函数：判断坐标是否落在历史失败死穴附近（80像素内）
+                let isDeadCoord = function(x, y) {
+                    for (let i = 0; i < failedCoords.length; i++) {
+                        if (Math.hypot(x - failedCoords[i].x, y - failedCoords[i].y) < 80) return true;
+                    }
+                    return false;
+                };
                 
                 // 1. 区域限制：底部浮层卡片通常在屏幕 62% 以下，优先扫描底部区间，彻底避开上方活动规则背景
                 let startY = parseInt(device.height * 0.62);
@@ -577,25 +618,98 @@
                     res_new = cappad([0, startY, device.width, device.height - startY]);
                 }
 
-                // 典型CTA按钮白名单（最高优先级）
+                // ==================== 历史真实样本库（成功与错误对照记录） ====================
+                // 【实测成功点击样本（正样本库）】
+                // 1. "查看详情" @ (631, 2365)  -> 京东生鲜广告底部蓝色大胶囊按钮（注意：Y坐标在2300+，排除了2067处的标题文本）
+                // 2. "去微信畅玩小游戏" @ (540, 2010) -> 微信小游戏全屏落地页底部的绿色大胶囊按钮
+                // 3. "立即体验" @ (540, 2080)  -> 京东小游戏广告底部的蓝色长条按钮
+                // 4. "去微信看看" @ (540, 2090)  -> 京东活动广告底部的蓝色长条按钮
+                // 5. "去微信玩" / "立即玩" / "开始玩" / "免费领取" -> 常见跳转第三方微信小游戏/小程序主CTA
                 let exactButtons = [
-                    "去微信畅玩小游戏", "去微信玩小游戏", "去微信小游戏", "去微信看看", "去微信玩", 
-                    "去微信体验", "去微信", "立即体验", "立即试玩", "立即玩", "开始玩", 
-                    "马上玩", "试玩小游戏", "畅玩小游戏", "在线玩", "立即下载", "查看详情", 
-                    "立即获得", "去完成", "立即抢购", "立即查看", "免费领取", "立即领取", 
-                    "立即打开", "去看看", "立即参与"
+                    "查看详情", "去微信畅玩小游戏", "立即体验", "去微信看看",
+                    "去微信玩小游戏", "去微信小游戏", "去微信玩", "去微信体验", "去微信", 
+                    "立即试玩", "立即玩", "开始玩", "马上玩", "试玩小游戏", "畅玩小游戏", 
+                    "在线玩", "立即下载", "立即获得", "去完成", "立即抢购", "立即查看", 
+                    "免费领取", "立即领取", "立即打开", "去看看", "立即参与"
                 ];
 
-                // 2. 文本有效性检测（过滤非按钮文字：数据指标、宣传语、规则、标题、应用名、标点、序号等）
-                let isInvalidBtn = function(txt) {
+                // 【实测错误点击样本（负样本库 / 避坑历史记录）】
+                // 1. "1.新下载APP的用户" -> 误因包含“下载”被识别，实为背景里的活动细则/规则说明
+                // 2. "京东小游戏" / "京东生鲜" -> 实为卡片顶部的应用名称/商家标题，不是激活按钮
+                // 3. "3亿玩家推荐游戏" -> 误因包含“游戏”被识别，实为中间带有数据噱头的宣传副标题
+                // 4. "查看详情" @ Y=2067 / 2097 -> 京东生鲜卡片上方的副标题展示文字（不可点击），非底部大按钮
+                // 5. "在玩10万人+" / "人气榜Top10" -> 实为应用展示的数据指标标签，非按钮
+                // 6. "仅需¥19.9/箱" / "包邮!0.01限一单[机智][勾引]" -> 实为商品价格促销文案或带表情符号的广告语
+                // 7. "帮宝适" @ (628, 1799) -> 实为商品品牌名称，距离底部真实按钮达560像素，不可作为按钮点击
+                let historicalErrorSamples = [
+                    "1.新下载APP的用户", "新下载APP的用户", "京东小游戏", "京东生鲜", 
+                    "3亿玩家推荐游戏", "在玩10万人+", "人气榜Top10", "仅需¥19.9/箱", 
+                    "包邮!0.01限一单[机智][勾引]", "新人评判标准", "活动仅限新人参加",
+                    "帮宝适"
+                ];
+
+                // 辅助函数：强化版穿透点击（解决防作弊过滤、手势遮挡、坐标偏移）
+                let robustTapCTA = function(tag, txt, posX, posY) {
+                    l_log(stageTag + tag + "：", txt, "@ (" + posX + "," + posY + ")");
+                    lastTappedPoint = { x: posX, y: posY };
+                    
+                    // 1. 无障碍节点原生点击尝试（穿透能力最强）
+                    let accNode = null;
+                    try {
+                        let nodes = text(txt).find();
+                        for (let i = 0; i < nodes.length; i++) {
+                            if (nodes[i].bounds().top >= parseInt(device.height * 0.75)) {
+                                accNode = nodes[i];
+                                break;
+                            }
+                        }
+                    } catch (e) {}
+
+                    if (accNode) {
+                        l_verbose("尝试无障碍节点原生触发...");
+                        if (accNode.click() || (accNode.parent() && accNode.parent().click())) {
+                            sleep(200);
+                        }
+                    }
+
+                    // 2. 真实物理触摸模拟（持续按压120ms，绕过广告SDK防自动化脚本的0ms过滤）
+                    // 优先点击屏幕水平绝对中心（device.width / 2），完全避开右下角摇摆的手势动画图层干扰
+                    let centerX = parseInt(device.width / 2);
+                    press(centerX, posY, 120);
+                    sleep(80);
+
+                    // 3. 如果识别到的坐标偏离中心，在原坐标处补按一次，形成双保险
+                    if (Math.abs(posX - centerX) > 80) {
+                        press(posX, posY, 100);
+                    }
+                };
+
+                // 2. 文本有效性检测（过滤非按钮文字：与错误样本库比对、过滤数据指标、规则、标题、应用名、标点、序号等）
+                let isInvalidBtn = function(txt, bounds) {
                     if (!txt) return true;
                     let clean = txt.replace(/\s+/g, "");
-                    // 如果直接命中按钮白名单，直接认定有效
-                    if (exactButtons.indexOf(clean) > -1) return false;
+
+                    // 核心几何门槛：真正的底部CTA大胶囊按钮必然在屏幕 78% 以下！
+                    // 上方的“查看详情”等标题（如 Y=2067，在全屏约75%处）、“帮宝适”（Y=1799）坚决拦截
+                    if (bounds && bounds.top < parseInt(device.height * 0.78)) {
+                        return true;
+                    }
+
+                    // 与实测错误历史样本库精准比对拦截
+                    for (let e = 0; e < historicalErrorSamples.length; e++) {
+                        if (clean.indexOf(historicalErrorSamples[e]) > -1 || historicalErrorSamples[e].indexOf(clean) > -1) {
+                            return true;
+                        }
+                    }
+
+                    // 如果直接命中按钮白名单：只要位置在 78% 以下，立即通过
+                    if (exactButtons.indexOf(clean) > -1) {
+                        return false;
+                    }
 
                     if (clean.length < 2 || clean.length > 8) return true; // 按钮通常2-8个字
-                    // 包含标点符号、数字编号或特定符号直接排除（按钮绝不包含这些，如 1.、3亿 等）
-                    if (/[\d\.\-\!\！\[\]\(\)\（\）\,\，\。\、\:\：\?\？\<\>\《\》\￥\¥\+]/.test(clean)) return true;
+                    // 包含标点符号、数字编号或特定符号直接排除（按钮绝不包含这些，如 1.、3亿、¥19.9、[机智] 等）
+                    if (/[\d\.\-\!\！\[\]\(\)\（\）\,\，\。\、\:\：\?\？\<\>\《\》\￥\¥\+\/]/.test(clean)) return true;
                     
                     // 严格排除应用名、规则、背景说明、数据指标、宣传语等黑名单
                     let blacklist = [
@@ -605,7 +719,7 @@
                         "包邮", "谁懂", "限一单", "购买", "商品", "当场", "享受", "福利", "复购", "单人", 
                         "秒杀", "立减", "可获得",
                         // 排除宣传噱头与数据指标（针对“3亿玩家推荐游戏”、“在玩10万人+”、“人气榜Top10”等）
-                        "亿", "万", "玩家", "推荐", "极品", "条目", "人气", "排行榜", "在玩", "榜"
+                        "亿", "万", "玩家", "推荐", "极品", "条目", "人气", "排行榜", "在玩", "榜", "箱", "斤"
                     ];
                     for (let i = 0; i < blacklist.length; i++) {
                         if (clean.indexOf(blacklist[i]) > -1) return true;
@@ -629,25 +743,34 @@
 
                 // 3. 优先级匹配
                 // 策略1：精确匹配完整的典型CTA按钮文本
+                // 注意：必须严格要求在屏幕下部 78% 以下（彻底排除 2067 处标题），并选最靠下且非死坐标的真实大按钮
+                let matchedBtn = null;
                 for (let i = 0; i < res_new.length; i++) {
                     let clean = res_new[i].text.replace(/\s+/g, "");
+                    let b = res_new[i].bounds;
                     if (exactButtons.indexOf(clean) > -1) {
-                        let b = res_new[i].bounds;
-                        if (b.top >= parseInt(device.height * 0.62)) {
-                            l_log(stageTag + "策略1-精准匹配按钮：", clean, "@ (" + b.centerX() + "," + b.centerY() + ")");
-                            click(b.centerX(), b.centerY());
-                            clicked = true;
-                            break;
+                        if (b.top >= parseInt(device.height * 0.78) && !isDeadCoord(b.centerX(), b.centerY())) {
+                            if (!matchedBtn || b.top > matchedBtn.bounds.top) {
+                                matchedBtn = { text: clean, bounds: b };
+                            }
                         }
                     }
                 }
+                if (matchedBtn) {
+                    let b = matchedBtn.bounds;
+                    robustTapCTA("策略1-精准匹配按钮（命中成功样本库）", matchedBtn.text, b.centerX(), b.centerY());
+                    clicked = true;
+                }
 
-                // 策略2：前缀动词短语匹配（以“立即/去微信/去/开始/点击/免费”开头且通过严格过滤）
+                // 策略2：前缀动词短语匹配（以“立即/去微信/去/开始/点击/免费”开头且通过严格过滤与负样本比对）
                 if (!clicked) {
                     let prefixes = ["立即", "去微信", "去", "开始", "点击", "免费"];
+                    let prefixBtn = null;
                     for (let i = 0; i < res_new.length; i++) {
                         let clean = res_new[i].text.replace(/\s+/g, "");
-                        if (isInvalidBtn(clean)) continue;
+                        let b = res_new[i].bounds;
+                        if (isInvalidBtn(clean, b)) continue;
+                        if (isDeadCoord(b.centerX(), b.centerY())) continue;
                         
                         let hasPrefix = false;
                         for (let p = 0; p < prefixes.length; p++) {
@@ -657,49 +780,91 @@
                             }
                         }
                         if (hasPrefix) {
-                            let b = res_new[i].bounds;
-                            if (b.top >= parseInt(device.height * 0.62)) {
-                                l_log(stageTag + "策略2-前缀动词匹配：", clean, "@ (" + b.centerX() + "," + b.centerY() + ")");
-                                click(b.centerX(), b.centerY());
-                                clicked = true;
-                                break;
+                            if (b.top >= parseInt(device.height * 0.78)) {
+                                if (!prefixBtn || b.top > prefixBtn.bounds.top) {
+                                    prefixBtn = { text: clean, bounds: b };
+                                }
                             }
                         }
                     }
+                    if (prefixBtn) {
+                        let b = prefixBtn.bounds;
+                        robustTapCTA("策略2-前缀动词匹配", prefixBtn.text, b.centerX(), b.centerY());
+                        clicked = true;
+                    }
                 }
 
-                // 策略3：距离标准底部按钮位置最近的候选文本（排除非法词后）
+                // 策略3：距离标准底部大按钮黄金位置最近的候选文本（严格限制距离 < 120px 且必须含动词动作，杜绝帮宝适等商品名）
                 if (!clicked) {
                     let candidates = [];
-                    let targetX = device.width / 2;
-                    let targetY = parseInt(device.height * 0.81);
+                    let targetX = parseInt(device.width / 2);
+                    let targetY = parseInt(device.height * 0.87); // 胶囊按钮黄金高度 (约2360)
+                    let actionKeywords = ["查", "看", "点", "去", "领", "玩", "试", "抢", "开", "享", "下", "购", "参", "完"];
 
                     for (let i = 0; i < res_new.length; i++) {
                         let clean = res_new[i].text.replace(/\s+/g, "");
-                        if (isInvalidBtn(clean)) continue;
                         let b = res_new[i].bounds;
-                        if (b.top >= parseInt(device.height * 0.62)) {
-                            let dist = Math.hypot(b.centerX() - targetX, b.centerY() - targetY);
-                            candidates.push({ text: clean, bounds: b, dist: dist });
+                        if (isInvalidBtn(clean, b)) continue;
+                        if (isDeadCoord(b.centerX(), b.centerY())) continue;
+
+                        // 距离门槛：垂直差距必须在 120 像素以内，严禁把几百像素外的品牌词当按钮
+                        if (Math.abs(b.centerY() - targetY) > 120) continue;
+
+                        // 词性门槛：必须包含动作意向词
+                        let hasActionWord = false;
+                        for (let k = 0; k < actionKeywords.length; k++) {
+                            if (clean.indexOf(actionKeywords[k]) > -1) {
+                                hasActionWord = true;
+                                break;
+                            }
                         }
+                        if (!hasActionWord) continue;
+
+                        let dist = Math.hypot(b.centerX() - targetX, b.centerY() - targetY);
+                        candidates.push({ text: clean, bounds: b, dist: dist });
                     }
 
                     if (candidates.length > 0) {
                         candidates.sort((a, b) => a.dist - b.dist);
                         let best = candidates[0];
-                        l_log(stageTag + "策略3-空间邻近候选匹配：", best.text, "@ (" + best.bounds.centerX() + "," + best.bounds.centerY() + ")");
-                        click(best.bounds.centerX(), best.bounds.centerY());
+                        robustTapCTA("策略3-严格空间邻近动词匹配", best.text, best.bounds.centerX(), best.bounds.centerY());
                         clicked = true;
                     }
                 }
 
-                // 策略4：保底固定位置点击（胶囊按钮位于屏幕水平居中，Y约为 81% 高度处）
+                // 策略4：保底固定大按钮按压与多点动态偏移避让（若中心死穴则自动偏移）
+                // 关键修正：初次识别阶段卡片尚未滑出（或处于落地页刚加载），不能盲目按压浮层黄金位；
+                // 只有在续看阶段（挽留浮层已完全弹出）才允许跌入浮层黄金位置按压
                 if (!clicked) {
-                    let fallbackX = device.width / 2;
-                    let fallbackY = parseInt(device.height * 0.81);
-                    l_log(stageTag + "策略4-保底固定按钮位置点击 @ (" + fallbackX + "," + fallbackY + ")");
-                    click(fallbackX, fallbackY);
-                    clicked = true;
+                    if (isResume) {
+                        let centerX = parseInt(device.width / 2);
+                        let targetY = parseInt(device.height * 0.87);
+
+                        // 多点动态偏移候选（中心 -> 偏左 -> 偏右 -> 偏下 -> 偏上）
+                        let offsetCandidates = [
+                            { x: centerX, y: targetY, desc: "黄金中心" },
+                            { x: centerX - 180, y: targetY, desc: "大按钮左半部" },
+                            { x: centerX + 180, y: targetY, desc: "大按钮右半部" },
+                            { x: centerX, y: targetY + 50, desc: "中心偏下" },
+                            { x: centerX, y: targetY - 50, desc: "中心偏上" }
+                        ];
+
+                        let chosen = null;
+                        for (let c = 0; c < offsetCandidates.length; c++) {
+                            if (!isDeadCoord(offsetCandidates[c].x, offsetCandidates[c].y)) {
+                                chosen = offsetCandidates[c];
+                                break;
+                            }
+                        }
+                        if (!chosen) chosen = offsetCandidates[0]; // 全试过则重试中心
+
+                        l_log(stageTag + "策略4-保底固定大按钮位置按压 [" + chosen.desc + "] @ (" + chosen.x + "," + chosen.y + ")");
+                        press(chosen.x, chosen.y, 150);
+                        lastTappedPoint = { x: chosen.x, y: chosen.y };
+                        clicked = true;
+                    } else {
+                        l_verbose("初次识别阶段暂未明确匹配到CTA按钮，不盲点浮层黄金位，交由倒计时等待");
+                    }
                 }
 
                 if (clicked) {
@@ -709,8 +874,11 @@
                     let wp_now = wherePage();
                     let curr_pkg = currentPackage();
 
-                    if (curr_pkg == qidianPackageName) {
-                        l_log("仍留在起点 App 内，继续等待");
+                    if (curr_pkg == qidianPackageName && (wp_now == "adframe" || wp_now == "freecenter")) {
+                        l_log("仍留在起点 App 内，此点击坐标可能无效，记录避坑");
+                        if (lastTappedPoint) failedCoords.push(lastTappedPoint);
+                    } else if (curr_pkg == qidianPackageName && wp_now == "internal_web") {
+                        l_info("检测到已打开起点内嵌落地页/商详页，激活成功");
                     } else if (curr_pkg.indexOf("permission") > -1 || curr_pkg.indexOf("packageinstaller") > -1) {
                         l_log("检测到权限管理弹窗，继续等待广告倒计时结束");
                     } else {
@@ -795,7 +963,7 @@
                             } else {
                                 l_log("倒计时未变（" + fast_sec + "→" + sec_after + "），确认为点击后看类型");
                                 ad_clicknewpage = fast_sec;
-                                clickAdButton();
+                                clickAdButton(); // 前面已经等了 3.5 秒，卡片与按钮早已渲染就绪，无需再等，直接识别点击
                             }
                             break;
                         }
@@ -912,6 +1080,8 @@
                 }
                 if (ad_raw > -1 || ad_clicknewpage > -1) {
                     if (ad_clicknewpage > -1) {
+                        l_verbose("等待 3.5 秒让广告按钮完全加载...");
+                        sleep(3500);
                         clickAdButton();
                     }
                     break;
@@ -979,10 +1149,10 @@
                     launchQidian();
                     sleep(1200);
                 }
-                // 回到起点后关闭内部打开的落地页（若已在广告页或福利中心则无需返回）
+                // 回到起点后关闭内部打开的落地页（若已在福利中心则无需返回）
                 wpCur = wherePage();
-                if (wpCur != "freecenter" && wpCur != "adframe" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1 && !isIgnoredOrFloatingApp(currentPackage())) {
-                    l_verbose("执行返回关闭页面");
+                if (wpCur != "freecenter" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1 && (currentPackage() == qidianPackageName || !isIgnoredOrFloatingApp(currentPackage()))) {
+                    l_verbose("广告结束，执行返回关闭内嵌落地页 (" + wpCur + ")");
                     back();
                     sleep(800);
                 }
@@ -1184,10 +1354,10 @@
                                 launchQidian();
                                 sleep(2000);
                             }
-                            // 回到起点后关闭内部页面（若已在广告页或福利中心则无需返回）
+                            // 回到起点后关闭内部页面（若已在福利中心则无需返回）
                             wpResume = wherePage();
-                            if (wpResume != "freecenter" && wpResume != "adframe" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1 && !isIgnoredOrFloatingApp(currentPackage())) {
-                                l_verbose("执行返回关闭页面");
+                            if (wpResume != "freecenter" && currentPackage().indexOf("permission") == -1 && currentPackage().indexOf("packageinstaller") == -1 && (currentPackage() == qidianPackageName || !isIgnoredOrFloatingApp(currentPackage()))) {
+                                l_verbose("续看结束，执行返回关闭内嵌落地页 (" + wpResume + ")");
                                 back();
                                 sleep(500);
                             }
@@ -1981,12 +2151,11 @@
     // 打开起点
     let alreadyInFreeCenter = openQidian();
     l_log(longdash);
-    sleep(500);
 
     // 进入福利中心
     if (!alreadyInFreeCenter) enterFreeCenter();
     l_log(longdash);
-    sleep(1000);
+    sleep(500);
 
     try {
         // 签到里面的兑换

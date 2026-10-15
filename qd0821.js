@@ -106,7 +106,7 @@
                 }
 
                 // 福利中心（最频繁访问的目标页面，优先识别）
-        if (textContains("完成任务得奖励").exists() && text("去完成").exists()) {
+        if (textContains("完成任务得奖励").exists() && (text("去完成").exists() || text("已领取").exists() || text("激励任务").exists())) {
             return "freecenter";
         }
 
@@ -269,7 +269,7 @@
         do {
             click("福利中心", 0);
             let m = 0;
-            while (m < 5 && !textContains("完成任务得奖励").exists() && !text("去完成").exists()) {
+            while (m < 5 && !textContains("完成任务得奖励").exists() && !text("去完成").exists() && !text("已领取").exists() && !text("激励任务").exists()) {
                 sleep(300);
                 m++;
             }
@@ -282,11 +282,11 @@
             n++;
         } while (n < 8 && wherePage() != "freecenter");
         if (n == 8) {
-            l_warn(wherePage(), currentPackage(), currentActivity());
-            l_error("没识别到福利中心");
-            l_exit();
+            l_warn("超时未识别到福利中心，跳过等待，继续下个步骤");
+            l_warn("当前页面：", wherePage(), currentPackage(), currentActivity());
+        } else {
+            l_info("已进入福利中心");
         }
-        l_info("已进入福利中心");
     }
     function closeDialogs() {
         function c(str, btn) {
@@ -592,7 +592,7 @@
             let btnBlacklist = ["点击后", "任务中", "已成功", "获得奖励", "秒后", "看完", "抽奖机会"];
             let failedCoords = []; // 记录本广告内已点击但未跳转的无效死坐标（防止死磕同一个点）
 
-            function clickAdButton(isResume) {
+            function clickAdButton(isResume, onlyExactMatch) {
                 let stageTag = isResume ? "续看阶段" : "初次识别";
                 let clicked = false;
                 let lastTappedPoint = null;
@@ -630,7 +630,8 @@
                     "去微信玩小游戏", "去微信小游戏", "去微信玩", "去微信体验", "去微信", 
                     "立即试玩", "立即玩", "开始玩", "马上玩", "试玩小游戏", "畅玩小游戏", 
                     "在线玩", "立即下载", "立即获得", "去完成", "立即抢购", "立即查看", 
-                    "免费领取", "立即领取", "立即打开", "去看看", "立即参与"
+                    "免费领取", "立即领取", "立即打开", "去看看", "立即参与", "立即秒杀", 
+                    "了解详情", "查看商品"
                 ];
 
                 // 【实测错误点击样本（负样本库 / 避坑历史记录）】
@@ -763,7 +764,7 @@
                 }
 
                 // 策略2：前缀动词短语匹配（以“立即/去微信/去/开始/点击/免费”开头且通过严格过滤与负样本比对）
-                if (!clicked) {
+                if (!clicked && !onlyExactMatch) {
                     let prefixes = ["立即", "去微信", "去", "开始", "点击", "免费"];
                     let prefixBtn = null;
                     for (let i = 0; i < res_new.length; i++) {
@@ -795,10 +796,10 @@
                 }
 
                 // 策略3：距离标准底部大按钮黄金位置最近的候选文本（严格限制距离 < 120px 且必须含动词动作，杜绝帮宝适等商品名）
-                if (!clicked) {
+                if (!clicked && !onlyExactMatch) {
                     let candidates = [];
                     let targetX = parseInt(device.width / 2);
-                    let targetY = parseInt(device.height * 0.87); // 胶囊按钮黄金高度 (约2360)
+                    let targetY = parseInt(device.height * 0.85); // 胶囊按钮黄金高度，一加ace5的位置就是这样（0.85更准，其他机型先不管）
                     let actionKeywords = ["查", "看", "点", "去", "领", "玩", "试", "抢", "开", "享", "下", "购", "参", "完"];
 
                     for (let i = 0; i < res_new.length; i++) {
@@ -835,10 +836,10 @@
                 // 策略4：保底固定大按钮按压与多点动态偏移避让（若中心死穴则自动偏移）
                 // 关键修正：初次识别阶段卡片尚未滑出（或处于落地页刚加载），不能盲目按压浮层黄金位；
                 // 只有在续看阶段（挽留浮层已完全弹出）才允许跌入浮层黄金位置按压
-                if (!clicked) {
+                if (!clicked && !onlyExactMatch) {
                     if (isResume) {
                         let centerX = parseInt(device.width / 2);
-                        let targetY = parseInt(device.height * 0.87);
+                        let targetY = parseInt(device.height * 0.85); // 一加ace5的位置就是0.85，其他机型先不管
 
                         // 多点动态偏移候选（中心 -> 偏左 -> 偏右 -> 偏下 -> 偏上）
                         let offsetCandidates = [
@@ -1080,9 +1081,13 @@
                 }
                 if (ad_raw > -1 || ad_clicknewpage > -1) {
                     if (ad_clicknewpage > -1) {
-                        l_verbose("等待 3.5 秒让广告按钮完全加载...");
-                        sleep(3500);
-                        clickAdButton();
+                        l_verbose("刚进广告，尝试立即精准识别按钮...");
+                        let clickSuccess = clickAdButton(false, true); // 只有完全匹配才点击
+                        if (!clickSuccess) {
+                            l_verbose("未精准匹配到按钮，等待 5 秒让广告完全加载后再试...");
+                            sleep(5000);
+                            clickAdButton(false, false); // 走全部策略
+                        }
                     }
                     break;
                 }

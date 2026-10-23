@@ -1,4 +1,4 @@
-    var title = "260720起点自动";
+    var title = "260821起点自动";
     var logFile = false; // 是否将日志保存到文件中
 
     // --- 用户配置项 ---
@@ -109,16 +109,20 @@
         }
 
         // 福利中心（秒级极速识别：只要在Browser页面且有福利中心标题或规则或限时加点，即为福利中心）
-        if (ca.indexOf("QDBrowserActivity") > -1 || ca.indexOf("Browser") > -1 || ca.indexOf("Web") > -1) {
-            if (text("福利中心").exists() || text("规则").exists() || textContains("限时加点").exists() || textContains("加点").exists()) {
+        // 关键防护：在原生主界面（包含“我”、“精选”、“书架”等导航Tab，或MainActivity）时，绝不能单凭页面存在“福利中心”文本误判为已进入福利中心
+        let isMainTabActivity = ca.indexOf("MainActivity") > -1 || (text("书架").exists() && text("精选").exists()) || (id("view_tab_title_title").text("我").exists() && (id("tvName").exists() || id("userInfo").exists()));
+        if (!isMainTabActivity) {
+            if (ca.indexOf("QDBrowserActivity") > -1 || ca.indexOf("Browser") > -1 || ca.indexOf("Web") > -1) {
+                if (text("福利中心").exists() || text("规则").exists() || textContains("限时加点").exists() || textContains("加点").exists()) {
+                    return "freecenter";
+                }
+            }
+            if (text("福利中心").exists() || (text("规则").exists() && textContains("任务").exists())) {
                 return "freecenter";
             }
-        }
-        if (text("福利中心").exists() || (text("规则").exists() && textContains("任务").exists())) {
-            return "freecenter";
-        }
-        if (textContains("完成任务得奖励").exists() || textContains("限时加点").exists()) {
-            return "freecenter";
+            if (textContains("完成任务得奖励").exists() || textContains("限时加点").exists()) {
+                return "freecenter";
+            }
         }
 
         // 网页/内嵌广告特征（在起点内部打开了商品落地页、H5网页、内置浏览器）
@@ -302,7 +306,12 @@
         }
         let n = 0;
         do {
-            click("福利中心", 0);
+            let fcBtn = text("福利中心").findOne(500);
+            if (fcBtn) {
+                robustClick(fcBtn);
+            } else {
+                click("福利中心", 0);
+            }
             let m = 0;
             while (m < 10 && wherePage() != "freecenter") {
                 sleep(200);
@@ -639,9 +648,9 @@
         launchQidian();
     }
 
-    function video_look(btn) {
+    function video_look(btn, isLimitTask) {
         adCount++;
-        l_verbose("广告", adCount, "开始");
+        l_verbose("广告", adCount, "开始" + (isLimitTask ? "【限时任务】" : ""));
         
         let isSlideTask = false; // 是否为滑动任务
         let has_slide_reset = false; // 标记是否发生了滑动重置
@@ -694,7 +703,7 @@
                     "去微信立即开玩", "去微信立即玩小游戏", "去微信畅玩小游戏", "去微信玩小游戏", "去微信玩", "去微信小游戏", "去微信体验", "去微信看看", "去微信", 
                     "查看详情", "立即体验", 
                     "立即试玩", "立即玩", "开始玩", "马上玩", "试玩小游戏", "畅玩小游戏", 
-                    "在线玩", "立即下载", "立即获得", "去完成", "立即抢购", "立即查看", 
+                    "在线玩", "立即下载", "立即获得", "去完成", "立即抢购", "立即购买", "立即查看", 
                     "免费领取", "立即领取", "立即打开", "去看看", "立即参与", "立即秒杀", 
                     "了解详情", "查看商品"
                 ];
@@ -782,7 +791,7 @@
                         "点击后", "任务中", "已成功", "获得奖励", "可得奖励", "秒后", "看完", "抽奖机会", 
                         "详情页", "第三方应用", "第三方", "广告", "版权", "用户", "新人", "活动", "规则", 
                         "标准", "评判", "下载APP", "下载App", "京东", "淘宝", "拼多多",
-                        "包邮", "谁懂", "限一单", "购买", "商品", "当场", "享受", "福利", "复购", "单人", 
+                        "包邮", "谁懂", "限一单", "购买后", "商品", "当场", "享受", "福利", "复购", "单人", 
                         "秒杀", "立减", "可获得",
                         // 排除宣传噱头与数据指标（针对“3亿玩家推荐游戏”、“在玩10万人+”、“人气榜Top10”等）
                         "亿", "万", "玩家", "推荐", "极品", "条目", "人气", "排行榜", "在玩", "榜", "箱", "斤"
@@ -901,20 +910,30 @@
                 // 策略4：保底固定大按钮按压与多点动态偏移避让（若中心死穴则自动偏移）
                 // 关键修正：初次识别阶段卡片尚未滑出（或处于落地页刚加载），不能盲目按压浮层黄金位；
                 // 只有在续看阶段（挽留浮层已完全弹出）才允许跌入浮层黄金位置按压
-                // 注意：一加Ace 5全屏弹窗卡片（如寻道大千微信小游戏）大按钮在 Y ≈ 0.635（约1778px），而底部常驻大按钮在 Y ≈ 0.85（约2380px）
+                // 区分场景：居中大按钮仅在【限时任务】微信小游戏弹窗时优先（Y ≈ 0.635/约1778px）；普通广告一律优先按【底部常驻大按钮】（Y ≈ 0.845/约2365px）
                 if (!clicked && !onlyExactMatch) {
                     if (isResume) {
                         let centerX = parseInt(device.width / 2);
-                        // 优先检查屏幕偏中间（约0.635）是否有小游戏绿色大按钮，否则使用底部 0.85 处
-                        let targetY = parseInt(device.height * 0.635); // 居中小游戏弹窗按钮位置（约1778）
+                        let centerCardY = parseInt(device.height * 0.635); // 居中小游戏弹窗按钮位置（约1778）
+                        let bottomBtnY = parseInt(device.height * 0.845);  // 底部常驻大按钮黄金位置（一加Ace 5约2365px）
 
-                        // 多点动态偏移候选（居中卡片按钮 -> 底部常驻按钮 -> 偏左 -> 偏右）
-                        let offsetCandidates = [
-                            { x: centerX, y: targetY, desc: "居中卡片大按钮" },
-                            { x: centerX, y: parseInt(device.height * 0.85), desc: "底部常驻大按钮" },
-                            { x: centerX - 180, y: targetY, desc: "居中卡片左半部" },
-                            { x: centerX + 180, y: targetY, desc: "居中卡片右半部" }
-                        ];
+                        // 多点动态偏移候选（按任务场景决定谁优先）
+                        let offsetCandidates = [];
+                        if (isLimitTask) {
+                            offsetCandidates = [
+                                { x: centerX, y: centerCardY, desc: "居中卡片大按钮(限时)" },
+                                { x: centerX, y: bottomBtnY, desc: "底部常驻大按钮" },
+                                { x: centerX - 180, y: centerCardY, desc: "居中卡片左半部" },
+                                { x: centerX + 180, y: centerCardY, desc: "居中卡片右半部" }
+                            ];
+                        } else {
+                            offsetCandidates = [
+                                { x: centerX, y: bottomBtnY, desc: "底部常驻大按钮" },
+                                { x: centerX - 180, y: bottomBtnY, desc: "底部按钮左半部" },
+                                { x: centerX + 180, y: bottomBtnY, desc: "底部按钮右半部" },
+                                { x: centerX, y: centerCardY, desc: "居中卡片大按钮备选" }
+                            ];
+                        }
 
                         let chosen = null;
                         for (let c = 0; c < offsetCandidates.length; c++) {
@@ -1339,28 +1358,30 @@
                             isSlideTask = false; // 执行完后重置标记，防止死循环
                         }
 
-                        if (isClickNewPage) {
-                            // 权限管理弹窗：直接 back 关闭
-                            let curPkgResume = currentPackage();
-                            let wpResume = wherePage();
-                            if (curPkgResume.indexOf("permission") > -1 || curPkgResume.indexOf("packageinstaller") > -1) {
-                                l_verbose("续看结束，权限管理弹窗，back关闭");
-                                back();
-                                sleep(500);
-                            } else if (curPkgResume != qidianPackageName && !isIgnoredOrFloatingApp(curPkgResume)) {
-                                l_verbose("续看结束，执行强制切换回起点");
-                                launchQidian(true);
-                                sleep(1500);
-                            }
-                            // 回到起点后如果存在内嵌落地页，关闭落地页
-                            wpResume = wherePage();
-                            if (wpResume == "browser" || wpResume == "internal_web") {
-                                l_verbose("续看结束，执行返回关闭内嵌落地页 (" + wpResume + ")");
-                                back();
-                                sleep(800);
-                            }
-                            isClickNewPage = false; // 执行完后重置
+                        // 续看无论是否被标记为跳转任务，看完后统一执行页面退出与返回检测
+                        sleep(800);
+                        let curPkgResume = currentPackage();
+                        let wpResume = wherePage();
+                        if (curPkgResume.indexOf("permission") > -1 || curPkgResume.indexOf("packageinstaller") > -1) {
+                            l_verbose("续看结束，权限管理弹窗，back关闭");
+                            back();
+                            sleep(500);
+                        } else if (curPkgResume != qidianPackageName && !isIgnoredOrFloatingApp(curPkgResume)) {
+                            l_verbose("续看结束，检测到在外部应用，执行强制切换回起点并返回");
+                            launchQidian(true);
+                            sleep(1500);
+                            back();
+                            sleep(500);
+                        } else if (wpResume == "browser" || wpResume == "internal_web") {
+                            l_verbose("续看结束，执行返回关闭内嵌落地页 (" + wpResume + ")");
+                            back();
+                            sleep(800);
+                        } else if (wpResume != "adframe" && wpResume != "freecenter") {
+                            l_verbose("续看结束，当前处于非广告界面 (" + wpResume + ")，尝试执行 back");
+                            back();
+                            sleep(600);
                         }
+                        isClickNewPage = false; // 执行完后重置
                         n = 0;
                         continue; // 继续在当前的 do-while !btn.parent() 中检测是否出现真正的关闭按钮
                     }
@@ -2385,7 +2406,7 @@
                 }
 
                 adRetryCount = 0;
-                video_look(limitActionBtn);
+                video_look(limitActionBtn, true);
                 
                 // 广告异常重试机制（同普通广告）：若失败尝试关闭重新进入
                 while (ad_raw == -1 && ad_clicknewpage == -1 && adRetryCount < 2) {
@@ -2399,7 +2420,7 @@
                     if (reBtn) {
                         robustClick(reBtn);
                         sleep(1000);
-                        video_look(reBtn);
+                        video_look(reBtn, true);
                     } else {
                         break;
                     }

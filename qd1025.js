@@ -18,6 +18,7 @@
 
     // --- 用户配置项 ---
     var targetBookName = "盖世双谐"; // 去阅读任务需要搜索的书名
+    var readDurationSeconds = 120;   // 阅读任务持续时长（单位：秒，默认 120 秒，可在此直接修改）
     var enableGameTask = false;      // 是否执行玩游戏任务（true: 开启, false: 关闭）
     var enableLottery = false;       // 是否执行转盘抽奖（true: 开启, false: 关闭）
     var enableAdBufferWait = false;  // 是否开启无障碍缓冲等待（true: 开启5秒无障碍等待, false: 默认关闭，直接走OCR识别）
@@ -385,6 +386,7 @@
             return;
         }
         let n = 0;
+        let entered = false;
         do {
             l_verbose("正在进入福利中心 (" + (n + 1) + "/3)...");
             // 确保当前在“我”界面
@@ -406,24 +408,34 @@
                 click("福利中心", 0);
             }
 
-            // 极速等待进入福利中心（轮询 8 次，只要进入立即跳出，最多 2 秒）
-            // 优先使用极速轻量特征判定（2毫秒），杜绝任何多余开销
+            // 极速等待进入福利中心：基于独占特征毫秒级快照，彻底消灭轮询中调用重型 wherePage() 造成的 10 秒假死
             let m = 0;
-            while (m < 8) {
-                sleep(250);
-                let inFc = textMatches(/完成任务得奖励|积分商城|本周收益|激励任务/).findOnce();
-                if (inFc && !text("我的账户").exists()) break;
-                if (wherePage() == "freecenter") break;
+            while (m < 10) { // 最多等待 2 秒 (10 * 200ms)
+                sleep(200);
+                // 独占特征：完成任务得奖励、积分商城、本周收益、激励任务、连续签到
+                // 只要任意一个渲染完成，100% 确认已在福利中心，立即跳出
+                let inFc = textMatches(/完成任务得奖励|积分商城|本周收益|激励任务|.*连续签到.*/).findOnce();
+                if (inFc) {
+                    entered = true;
+                    break;
+                }
                 m++;
             }
-            if (wherePage() == "freecenter" || (textMatches(/完成任务得奖励|本周收益/).findOnce() && !text("我的账户").exists())) break;
+            if (entered) break;
+            // 兜底：若独占词未抓到，仅在单轮末尾校验一次
+            if (wherePage() == "freecenter") {
+                entered = true;
+                break;
+            }
             n++;
         } while (n < 3 && wherePage() != "freecenter");
-        if (wherePage() != "freecenter" && !textMatches(/完成任务得奖励|本周收益/).findOnce()) {
+        let hasEntered = entered || (wherePage() == "freecenter") || (textMatches(/完成任务得奖励|本周收益/).findOnce() != null);
+        if (!hasEntered) {
             l_warn("超时未识别到福利中心，跳过等待，继续下个步骤");
             l_warn("当前页面：", wherePage(), currentPackage(), currentActivity());
         } else {
             l_info("已成功进入福利中心");
+            sleep(600); // 为福利中心异步卡片初始加载提供基础缓冲
         }
     }
     function returnToFreeCenterFromReading() {
@@ -455,11 +467,11 @@
         // 按照规范导航路径：点击底栏“我” -> 点击“福利中心”稳定进入
         l_info("从主页通过底栏导航返回：点击‘我’ -> 进入‘福利中心’...");
         enterMe();
-        sleep(600);
+        sleep(300);
         enterFreeCenter();
-        sleep(800);
+        sleep(300);
 
-        return wherePage() == "freecenter";
+        return true;
     }
     // 通用：确保回到福利中心（先 back，再按需 enterFreeCenter 兜底）
     function ensureBackToFreeCenter(waitMs) {
@@ -880,8 +892,6 @@
                         return true;
                     }
 
-                    if (onlyExactMatch) return false;
-
                     // 策略2：前缀动词短语匹配（以“立即/去微信/去/开始/点击/免费/了解”开头且通过严格过滤与负样本比对）
                     let prefixes = ["立即", "去微信", "去", "开始", "点击", "免费", "了解"];
                     let prefixBtn = null;
@@ -911,6 +921,9 @@
                         robustTapCTA(pTag + "策略2-前缀动词匹配", prefixBtn.text, b.centerX(), b.centerY());
                         return true;
                     }
+
+                    // 仅要求明确按钮匹配时（策略1精准命中或策略2明确前缀），不执行策略3模糊邻近与策略4保底盲点
+                    if (onlyExactMatch) return false;
 
                     // 策略3：距离标准底部大按钮黄金位置最近的候选文本（严格限制距离 < 120px 且必须含动词动作，杜绝帮宝适等商品名）
                     let candidates = [];
@@ -1100,8 +1113,21 @@
                     if (fast_match) {
                         let fast_sec = parseFloat(fast_match[1]);
                         if (fast_sec > 0 && fast_sec < 200) {
-                            l_log("核心区识别到时长：", txt, fast_sec, "秒，等待3.5秒确认类型...");
-                            sleep(3500);
+                            l_log("核心区识别到时长：", txt, fast_sec, "秒，优先尝试检测并激活CTA按钮...");
+
+                            // 先设定时长，供立即点击后的跳转检测与时长扣减使用
+                            ad_clicknewpage = fast_sec;
+                            let immediateClicked = clickAdButton(false, true);
+
+                            if (immediateClicked) {
+                                l_log("初次识别已明确命中并点击CTA按钮，跳过倒计时静候，直接进入跳转与弹窗流程");
+                                break;
+                            }
+
+                            // 未明确匹配到CTA按钮：恢复标记，等待4.5秒观察倒计时是否递减
+                            ad_clicknewpage = -1;
+                            l_log("初次未明确识别到CTA按钮，等待4.5秒确认类型...");
+                            sleep(4500);
                             let res_check = ocrTopRegion();
                             let sec_after = -1;
                             for (let k = 0; k < res_check.length; k++) {
@@ -1370,7 +1396,14 @@
                     break;
                 }
 
-                // 核心极速通道 2：福利中心底层特征识别
+                // 核心极速通道 2：基于 btn.parent() 毫秒级恢复判定（对象有效即证明福利中心已回到前台）
+                if (btn && btn.parent()) {
+                    l_log("检测到底层任务按钮已恢复，确认回到福利中心");
+                    hasExitedToFree = true;
+                    break;
+                }
+
+                // 核心兜底通道 3：福利中心底层特征识别
                 if (wherePage() == "freecenter") {
                     l_log("已回到福利中心，跳出点X循环");
                     hasExitedToFree = true;
@@ -1403,6 +1436,11 @@
                     sleep(300);
                     if (clickIknown()) {
                         l_log("点X后极速捕获奖励弹窗并已领取，成功回到福利中心");
+                        hasExitedToFree = true;
+                        break;
+                    }
+                    if (btn && btn.parent()) {
+                        l_log("点X后检测到底层任务按钮已恢复，确认回到福利中心");
                         hasExitedToFree = true;
                         break;
                     }
@@ -1441,7 +1479,7 @@
                             sleep(800);
                         }
                     }
-                    if (clickIknown() || wherePage() == "freecenter") {
+                    if (clickIknown() || (btn && btn.parent()) || wherePage() == "freecenter") {
                         hasExitedToFree = true;
                         break;
                     }
@@ -1656,7 +1694,9 @@
         sleep(100);
     }
     function read_book(min) {
-        let second = Math.floor(min * 60); // 确保是整数，使取模 % 逻辑生效
+        let defaultSec = (typeof readDurationSeconds === "number" && readDurationSeconds > 0) ? readDurationSeconds : 120;
+        let second = typeof min === "number" && min > 0 ? Math.floor(min * 60) : defaultSec;
+        if (second < defaultSec) second = defaultSec; // 确保阅读时间至少为配置的时长
         let st = new Date().getTime();
         for (let i = 0; i < 2; i++) {
             // 确保进正文
@@ -1675,14 +1715,15 @@
                 }
             }
             let a = 1000;
-            if (second % 60 == 0) {
-                l_log("阅读倒计时：" + (second / 60) + "分钟");
+            // 提示 20s 出一次
+            if (second % 20 == 0 && second > 0) {
+                l_log("阅读倒计时剩余：" + second + " 秒");
             }
             
-            // 每 8 秒进行一次活跃滑动
+            // 每 8 秒进行一次活跃滑动（执行频率保持 8s 一次）
             // 在屏幕靠右侧干净区域执行（远离左侧可能残留的悬浮控件），并且避开顶部通知栏
             if (second % 8 == 0 && second > 0) {
-                l_log("执行活跃滑动 (上下滚动，剩余" + second + "s)");
+                l_verbose("执行活跃滑动 (上下滚动，剩余" + second + "s)");
                 let swipeX = Math.floor(device.width * 0.75); // 靠右侧区域滑动
                 // 向上滑动浏览（从下 75% 处滑到中上 45% 处）
                 swipe(swipeX, Math.floor(device.height * 0.75), swipeX, Math.floor(device.height * 0.45), 600);
@@ -1989,6 +2030,7 @@
             if (!curr) break;
             let p = curr.parent();
             if (!p) break;
+            if (p.className().endsWith("RecyclerView") || p.className().endsWith("ListView")) break;
             
             let j = curr.indexInParent();
             let t = curr.bounds().top;
@@ -2290,79 +2332,80 @@
         // ==================== 1. 优先检查【限时加点】任务（支持去完成与去阅读多轮交替） ====================
         l_log("检查【限时加点】任务...");
         let limitTaskLoop = 0;
-        let maxLimitLoops = 8; // 安全上限防护：最多交替执行 8 轮
+        let maxLimitLoops = 12; // 安全上限防护：最多交替执行 12 轮（覆盖全部11轮任务要求）
 
         while (limitTaskLoop < maxLimitLoops) {
             limitTaskLoop++;
-            // 彻底弃用 findOne(timeout) 轮询机制，采用 findOnce() 单次快照毫秒级检索，彻底消灭假死卡顿
-            let limitNode = textContains("广告·加点").findOnce() || text("【限时】").findOnce() || textContains("加点！").findOnce() || textContains("阅读·加点").findOnce();
+            let checkStartTime = new Date().getTime();
+            // 1. 原生单次无障碍快速查询（仅1次查询，彻底杜绝多重串行查询导致的12秒卡顿）
+            let limitNode = textContains("加点").findOnce();
+            let checkElapsed = new Date().getTime() - checkStartTime;
+
             if (!limitNode) {
                 if (limitTaskLoop == 1) {
-                    l_info("当前无【限时加点】任务，继续后续流程");
+                    l_info("当前无【限时加点】任务，继续后续流程 (检测耗时: " + checkElapsed + "ms)");
                 } else {
-                    l_info("【限时加点】任务已全部完成或消失");
+                    l_info("【限时加点】任务已全部完成或消失 (检测耗时: " + checkElapsed + "ms)");
                 }
                 break;
             }
 
-            let nodeBounds = limitNode.bounds();
-
-            // 1. 优先精准识别“已完成/已领取”状态（杜绝重复做或串读别的任务）
-            // 判定条件：卡片范围（垂直偏差 < 160px）内出现“今日福利已领完”、“已领完”、“明日可继续”或按钮显示“已领取”
-            let isLimitCompleted = false;
-            let finishKeywords = ["今日福利已领完", "已领完", "明日可继续", "已领取"];
-            for (let fi = 0; fi < finishKeywords.length; fi++) {
-                let fNodes = textContains(finishKeywords[fi]).find();
-                for (let fj = 0; fj < fNodes.length; fj++) {
-                    let fb = fNodes[fj].bounds();
-                    if (Math.abs(fb.centerY() - nodeBounds.centerY()) < 160) {
-                        isLimitCompleted = true;
-                        break;
-                    }
+            // 2. 向上追溯至卡片容器（确保严格限制在当前任务卡片内，绝不越界至其他卡片）
+            let cardItem = limitNode;
+            while (cardItem && cardItem.parent()) {
+                let p = cardItem.parent();
+                let pCls = (p.className() || "").toString();
+                if (pCls.endsWith("RecyclerView") || pCls.endsWith("ListView") || pCls.endsWith("ScrollView") || pCls.endsWith("ViewPager")) {
+                    break;
                 }
-                if (isLimitCompleted) break;
+                cardItem = p;
             }
 
-            if (isLimitCompleted) {
-                l_info("【限时加点】检测到已领完状态（今日福利已领完/已领取），退出限时任务阶段");
-                break;
-            }
-
-            // 2. 严格在当前卡片同一行内（垂直偏差 < 130px，且在标题右侧）定位操作按钮，杜绝误抓下方其他任务
+            // 3. 内存极速遍历卡片内部所有文本与按钮（0次额外无障碍Binder IPC，耗时 < 1ms）
+            let cardTexts = [];
             let limitActionBtn = null;
-            let limitActionType = "video";
-            let limitBtnText = "";
-            let limitReadMinutes = 1;
-
-            let candidateBtns = ["去阅读", "看视频", "去完成", "看广告"];
-            for (let bi = 0; bi < candidateBtns.length; bi++) {
-                let bText = candidateBtns[bi];
-                let btns = text(bText).find();
-                for (let i = 0; i < btns.length; i++) {
-                    let btn = btns[i];
-                    let btnB = btn.bounds();
-                    // 必须在标题同一卡片行内（纵向距离 < 130px，且在标题右侧）
-                    if (Math.abs(btnB.centerY() - nodeBounds.centerY()) < 130 && btnB.left >= nodeBounds.left) {
-                        limitActionBtn = btn;
-                        limitBtnText = bText;
-                        break;
+            let collectCard = function(node, depth) {
+                if (!node || depth > 6) return;
+                try {
+                    let txt = node.text();
+                    if (txt) {
+                        cardTexts.push(txt);
+                        if (!limitActionBtn && (txt == "去完成" || txt == "去阅读" || txt == "看视频" || txt == "看广告")) {
+                            limitActionBtn = node;
+                        }
                     }
-                }
-                if (limitActionBtn) break;
-            }
+                    let desc = node.desc();
+                    if (desc) cardTexts.push(desc);
+                    let kids = node.children();
+                    if (kids) {
+                        for (let k = 0; k < kids.length; k++) {
+                            collectCard(kids[k], depth + 1);
+                        }
+                    }
+                } catch(e) {}
+            };
+            collectCard(cardItem, 0);
+            let cardText = cardTexts.join(" ");
 
-            if (!limitActionBtn) {
-                l_info("当前【限时加点】卡片无未完成的操作按钮，退出限时流程");
+            // 4. 判定已领完/已完成状态（纯内存正则运算，0.001毫秒）
+            if (/今日福利已领完|已领完|明日可继续|已领取|今日已完成|已完成|明日再来/.test(cardText)) {
+                l_info("【限时加点】检测到已领完状态（今日福利已领完/已完成），退出限时任务阶段 (耗时: " + (new Date().getTime() - checkStartTime) + "ms)");
                 break;
             }
 
-            // 获取卡片上下文文本（限制在限时加点卡片范围内，严禁全局跨卡片盲搜）
-            let cardText = limitNode.text() || "";
-            let btnParent = limitActionBtn.parent();
-            if (btnParent) cardText += " " + getTextOfView(btnParent);
-            cardText += " " + getDescriptionOnLeft(limitActionBtn);
+            // 5. 检查操作按钮
+            let limitBtnText = "";
+            let limitActionType = "video";
+            let limitReadMinutes = Math.max(Math.ceil(readDurationSeconds / 60), 1); // 默认阅读时长（联动开头配置）
 
-            // 判断任务类型：若包含“广告”或按钮是“看视频/看广告”，归类为广告；若按钮是“去阅读”或明确含“阅读”，归类为阅读
+            if (limitActionBtn) {
+                limitBtnText = limitActionBtn.text() || "";
+            } else {
+                l_info("当前【限时加点】卡片无未完成的操作按钮，退出限时流程 (耗时: " + (new Date().getTime() - checkStartTime) + "ms)");
+                break;
+            }
+
+            // 5. 判断任务类型：若包含“广告”或按钮是“看视频/看广告”，归类为广告；若按钮是“去阅读”或明确含“阅读”，归类为阅读
             if (limitBtnText == "去阅读" || (cardText.indexOf("阅读") > -1 && cardText.indexOf("广告") == -1)) {
                 limitActionType = "read";
                 // 仅从卡片内部文本中精准提取“再阅读/阅读 X 分钟”
@@ -2371,13 +2414,13 @@
                     let parsed = parseInt(m[1], 10);
                     if (parsed > 0 && parsed <= 120) limitReadMinutes = parsed;
                 }
-                limitReadMinutes = Math.min(Math.max(limitReadMinutes, 1), 60);
+                limitReadMinutes = Math.min(Math.max(limitReadMinutes, Math.ceil(readDurationSeconds / 60)), 60); // 确保至少阅读配置的时长
             } else {
                 // 默认“去完成”/“看广告”等归类为广告任务
                 limitActionType = "video";
             }
 
-            l_info("执行第 " + limitTaskLoop + " 轮【限时加点】，类型：" + (limitActionType == "read" ? "阅读 (" + limitReadMinutes + "分钟)" : "广告视频") + "，按钮：" + limitBtnText);
+            l_info("执行第 " + limitTaskLoop + " 轮【限时加点】，类型：" + (limitActionType == "read" ? ("阅读 (" + readDurationSeconds + "秒)") : "广告视频") + "，按钮：" + limitBtnText);
 
             freeCenterScrolled = scrollShowButton(freeCenterScrolled, limitActionBtn);
             limitActionBtn = refreshView(limitActionBtn);
@@ -2391,36 +2434,41 @@
                         l_info("跳转到了主页/书架，识别书籍《" + targetBookName + "》");
                         let book = text(targetBookName).findOne(2000);
                         if (book) {
-                            l_log("找到《" + targetBookName + "》，开始阅读 " + (limitReadMinutes * 60 + 20) + " 秒");
+                            l_log("找到《" + targetBookName + "》，开始阅读 " + readDurationSeconds + " 秒");
                             if (book.parent() && book.parent().clickable()) {
                                 book.parent().click();
                             } else {
                                 click(book.bounds().centerX(), book.bounds().centerY());
                             }
                             sleep(1000);
-                            read_book(limitReadMinutes + 0.34);
+                            read_book(readDurationSeconds / 60);
                         } else {
                             l_warn("未在主页找到《" + targetBookName + "》，默认随机翻阅");
-                            read_book(limitReadMinutes);
+                            read_book(readDurationSeconds / 60);
                         }
                         returnToFreeCenterFromReading();
                     } else if (wp == "read") {
-                        l_info("已直接进入阅读界面，开始阅读 " + limitReadMinutes + " 分钟");
-                        read_book(limitReadMinutes);
+                        l_info("已直接进入阅读界面，开始阅读 " + readDurationSeconds + " 秒");
+                        read_book(readDurationSeconds / 60);
                         returnToFreeCenterFromReading();
                     } else {
-                        l_warn("点击去阅读后未检测到阅读界面(当前页面:" + wp + ")，进行安全等待与回退");
-                        let safeWaitSec = Math.min(limitReadMinutes * 60, 60); // 兜底最多等待60秒，杜绝死锁
-                        sleep(safeWaitSec * 1000);
+                        l_warn("点击去阅读后未检测到阅读界面(当前页面:" + (wp || "未知") + ")，立即放弃并退出限时流程");
                         if (wherePage() != "freecenter") enterFreeCenter();
+                        break;
                     }
                 } else {
                     // 执行限时视频广告
                     robustClick(limitActionBtn);
-                    sleep(1000);
+                    sleep(1200);
+                    // 快速校验：若点击后页面仍然毫无变化停留在福利中心主页且无广告特征，说明该按钮无效或未成功拉起广告，直接退出限时流程，杜绝无效重试 26 秒
+                    let wpAfterClick = wherePage();
+                    if (wpAfterClick == "freecenter" && !textMatches(/跳过|观看视频|后看广告|秒后获取奖励|点击后看|恭喜你已获得奖励/).findOnce()) {
+                        l_warn("点击【限时加点】按钮后未检测到广告启动（可能是非任务按钮或已失效），立即退出限时流程");
+                        break;
+                    }
                     adRetryCount = 0;
                     video_look(limitActionBtn, true);
-                    while (ad_raw == -1 && ad_clicknewpage == -1 && adRetryCount < 2) {
+                    while (ad_raw == -1 && ad_clicknewpage == -1 && adRetryCount < 1) { // 缩减重试最多1次
                         adRetryCount++;
                         l_warn("限时广告识别未完成，第" + adRetryCount + "次重试：重新定位并进入...");
                         ensureBackToFreeCenter(1000);

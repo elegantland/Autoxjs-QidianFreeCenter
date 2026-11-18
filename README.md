@@ -16,7 +16,7 @@
 ## 🚀 快速开始
 
 1. **安装环境**：
-   - 手机安装 [Autox.js v7](https://github.com/kkevsekk1/AutoX) （推荐 7.2.2 及以上版本，需支持 Paddle-OCR）。
+   - 手机安装 [Autox.js v7](https://github.com/aiselp/AutoX) （推荐 7.2.2 及以上版本，需支持 Paddle-OCR）。
    - 赋予 Autox.js **无障碍服务**、**悬浮窗**、**后台白名单/电池无限制** 以及 **截屏权限**。
 2. **下载脚本**：
    - 下载仓库中的主脚本文件：[`qd1025.js`](./qd1025.js)。
